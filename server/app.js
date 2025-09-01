@@ -27,7 +27,7 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
  * Route imports
  * --------------------------- */
 const authRoutes = require("./routes/auth.routes");
-const userRoutes = require("./routes/user.routes");
+//const userRoutes = require("./routes/user.routes");
 const productRoutes = require("./routes/product.routes");
 const orderRoutes = require("./routes/order.routes");
 const wishlistRoutes = require("./routes/wishlist.routes");
@@ -39,12 +39,14 @@ const analyticsRoutes = require("./routes/analytics.routes");
 const masterRoutes = require("./routes/master.routes");
 const notificationRoutes = require("./routes/notification.routes");
 const buyerRoutes = require("./routes/buyer.routes"); // 👈 added
+const cartRoutes = require("./routes/cart.routes");
+
 
 /* ---------------------------
  * Mount routes (prefixes)
  * --------------------------- */
 app.use("/api/auth", authRoutes);
-app.use("/api/users", userRoutes);
+//app.use("/api/users", userRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/wishlist", wishlistRoutes);
@@ -55,7 +57,8 @@ app.use("/api/payroll", payrollRoutes);
 app.use("/api/analytics", analyticsRoutes);
 app.use("/api/master", masterRoutes);
 app.use("/api/notifications", notificationRoutes);
-app.use("/api/buyers", buyerRoutes); // 👈 added
+app.use("/api/buyers", buyerRoutes); 
+app.use("/api/cart", cartRoutes);
 
 // Health check
 app.get("/", (_req, res) => res.send("DeepGlam API running..."));

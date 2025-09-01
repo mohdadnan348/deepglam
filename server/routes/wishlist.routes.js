@@ -1,16 +1,16 @@
 const express = require('express');
 const router = express.Router();
 const wishlistController = require('../controllers/wishlist.controller');
-//const verifyToken = require('../middlewares/verifyToken');
+const { verifyJWT } = require("../middlewares/auth.middleware"); // ✅ Correct import
 
-// ✅ All wishlist routes require user to be logged in
-//router.use(verifyToken);
+// All cart routes require authentication
+router.use(verifyJWT);
 
 // ➕ Add to wishlist
 router.post('/:productId', wishlistController.addToWishlist);
 
 // ❌ Remove from wishlist
-router.delete('/:productId', wishlistController.removeFromWishlist);
+router.delete('/remove/:productId', wishlistController.removeFromWishlist); 
 
 // 📥 Get user's wishlist
 router.get('/', wishlistController.getWishlist);

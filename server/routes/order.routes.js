@@ -1,13 +1,22 @@
-// server/routes/order.routes.js
-const express = require("express");
+// routes/order.routes.js
+const express = require('express');
 const router = express.Router();
-const { verifyJWT } = require("../middlewares/auth.middleware");
-const orderCtrl = require("../controllers/order.controller");
+const orderController = require('../controllers/order.controller');
 
-// Essentials only
-router.post("/",  orderCtrl.placeOrder);
-router.get("/",  orderCtrl.getAllOrders);
-router.get("/:id",  orderCtrl.getOrderById);
-router.patch("/:id/status",  orderCtrl.updateStatus);
+// GET all orders
+router.get('/orders', orderController.getAllOrders);
+
+// POST create new order
+router.post('/orders', orderController.placeOrder);
+
+// GET single order by ID
+router.get('/orders/:id', orderController.getOrderById);
+
+// PATCH update order status
+router.patch('/orders/:id/status', orderController.updateStatus);
+
+// Shortcut routes
+router.patch('/orders/:id/pack', orderController.markPacked);
+router.patch('/orders/:id/deliver', orderController.markDelivered);
 
 module.exports = router;
