@@ -1,238 +1,197 @@
-// controllers/buyer.controller.js
+// server/controllers/buyer.controller.js
 const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 const Buyer = require("../models/buyer.model");
 const User = require("../models/user.model");
-const Staff = require("../models/staff.model");
-const Order = require("../models/order.model");
-const bcrypt = require("bcryptjs");
+const Staff = require("../models/staff.model");      // for auto-linking to staff
+const Order = require("../models/order.model");      // for buyerOrders
+const { generateToken } = require("../utils/token.utils");
 
-/* ---------- helpers ---------- */
-const toInt = (v, fallback = 0) => {
-  const n = parseInt(v, 10);
-  return Number.isNaN(n) ? fallback : n;
+// ---------- Helpers ----------
+const maybeJSON = (v) => {
+  if (v == null) return undefined;
+  if (typeof v === "object") return v;
+  try { return JSON.parse(v); } catch { return undefined; }
 };
-
-const normalizePhone = (req) => {
-  const p = String(req.body.phone || req.body.mobile || "").trim();
-  if (!p) throw new Error("phone or mobile is required");
-  req.body.phone = p;
-  req.body.mobile = p;
-  return p;
+const toImageObj = (url) => (url ? { url, public_id: undefined } : undefined);
+const normalizeDocType = (t = "") => {
+  const x = String(t).trim().toLowerCase();
+  if (["aadhaar","aadhaar card","aadhar","aadhar card"].includes(x)) return "AADHAAR";
+  if (["pan","pan card"].includes(x)) return "PAN";
+  if (["udyam","udyam certificate"].includes(x)) return "UDYAM";
+  if (["gst","gst certificate"].includes(x)) return "GST";
+  return "OTHER";
 };
-
-const ensureDocTypes = (docs = []) => {
-  const ALLOWED = ["PAN", "AADHAAR", "UDYAM", "GST", "OTHER"];
-  for (const d of docs) {
-    if (d?.type && !ALLOWED.includes(d.type)) {
-      throw new Error(`Invalid document type: ${d.type}`);
-    }
+async function getStaffFromRequest(req, session) {
+  // Prefer userId -> staff link
+  if (req.user?._id) {
+    const byUser = await Staff.findOne({ userId: req.user._id }).session(session);
+    if (byUser) return byUser;
   }
-};
-
-const makeSafeBuyer = (b) => {
-  if (!b) return b;
-  const obj = b.toObject ? b.toObject() : b;
-  delete obj.passwordHash;
-  return obj;
-};
-
-/* ---------- resolvers (via logged-in user) ---------- */
-
-// Resolve Staff for the current user.
-// Priority: req.user.staffId (from verifyJWT) → Staff.findOne({ userId: req.user._id })
-async function getStaffForReq(req, { required = true } = {}) {
-  if (!req.user?._id) {
-    const err = new Error("Unauthorized: user missing");
-    err.status = 401;
-    throw err;
+  // Fallbacks by phone/email
+  if (req.user?.phone) {
+    const byPhone = await Staff.findOne({ phone: req.user.phone }).session(session);
+    if (byPhone) return byPhone;
   }
-
-  if (req.user.staffId) {
-    const s = await Staff.findById(req.user.staffId);
-    if (s) return s;
-  }
-
-  const s = await Staff.findOne({ userId: req.user._id });
-  if (s) return s;
-
-  if (required) {
-    const err = new Error("Staff record not found for current user");
-    err.status = 404;
-    throw err;
+  if (req.user?.email) {
+    const byEmail = await Staff.findOne({ email: (req.user.email || "").toLowerCase() }).session(session);
+    if (byEmail) return byEmail;
   }
   return null;
 }
 
-// Resolve Buyer for the current user.
-// Priority: req.user.buyerId → Buyer.findOne({ userId: req.user._id })
-async function getBuyerForReq(req, { required = true } = {}) {
-  if (!req.user?._id) {
-    const err = new Error("Unauthorized: user missing");
-    err.status = 401;
-    throw err;
-  }
+// ---------- Controllers ----------
 
-  if (req.user.buyerId) {
-    const b = await Buyer.findById(req.user.buyerId);
-    if (b) return b;
-  }
-
-  const b = await Buyer.findOne({ userId: req.user._id });
-  if (b) return b;
-
-  if (required) {
-    const err = new Error("Buyer record not found for current user");
-    err.status = 404;
-    throw err;
-  }
-  return null;
-}
-
-const isAdmin = (req) => ["admin", "superadmin"].includes(req.user?.role);
-const isStaff = (req) => req.user?.role === "staff";
-
-/* -------------------------------------------
-   CREATE / REGISTER BUYER
-   -> Staff derived from logged-in user (real code only)*/
+/**
+ * POST /buyers
+ * Body (minimal required): { name, mobile, gender, shopName, shopAddress }
+ * Optional: { email, password, documents, bank..., employeeCode, staffId, shopImageUrl, country/state/city/postalCode }
+ * Behavior:
+ *  - Auto-resolve staff from req.user (logged-in staff). Fallback: staffId/employeeCode if provided.
+ *  - Find-or-create User for buyer on mobile/email (random password fallback).
+ *  - Create Buyer with isApproved=true (no approval flow).
+ */
 exports.createBuyer = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
     const {
-      // client-supplied employeeCode will be IGNORED for staff users
-      // (admins or self-registering buyers MUST provide a valid one)
-      employeeCode: employeeCodeFromBody,
-      registeredBy,
+      // minimal required
+      name, mobile, gender, shopName,
 
-      // legacy/ignored fields (kept for backward compat)
-      staffId: staffIdFromBody,
-      employee: employeeFromBody,
+      // optional
+      email, password,
+      shopAddress, country, state, city, postalCode,
+      documents, shopImageUrl,
+      bankName, branchName, accountHolderName, accountNumber, ifscCode, beneficiaryName,
 
-      name,
-      email,
-      gender,
-      password,
-      shopName,
-      shopImage,
-      shopAddress,
-      documents,
-      bank,
-      isApproved,
+      // OPTIONAL fallbacks if not logged-in as staff
+      employeeCode, staffId,
     } = req.body;
 
-    const phone = normalizePhone(req);
-    ensureDocTypes(documents || []);
-
-    if (
-      !name ||
-      !gender ||
-      !shopName ||
-      !shopAddress?.line1 ||
-      !shopAddress?.city ||
-      !shopAddress?.state ||
-      !shopAddress?.postalCode
-    ) {
-      throw new Error("name, gender, shopName, shopAddress.line1/state/city/postalCode are required");
+    if (!name || !mobile || !gender || !shopName) {
+      await session.abortTransaction(); session.endSession();
+      return res.status(400).json({ message: "name, mobile, gender, shopName are required" });
     }
 
-    // -------- Resolve staff (REAL staff) --------
-    let staffDoc = null;
-
-    if (req.user?.role === "staff") {
-      // Staff creating a buyer → always use THEIR OWN staff record (prevents spoofing)
-      const myStaff = await Staff.findOne({ userId: req.user._id }).session(session);
-      if (!myStaff) throw new Error("Staff record not found for current user");
-      staffDoc = myStaff;
-    } else if (req.user?.role === "admin" || req.user?.role === "superadmin") {
-      // Admin path — allow explicit employeeCode OR staffId override
-      if (employeeCodeFromBody) {
-        staffDoc = await Staff.findOne({ employeeCode: String(employeeCodeFromBody).trim() }).session(session);
-      } else if (staffIdFromBody || employeeFromBody) {
-        const sid = staffIdFromBody || employeeFromBody;
-        if (sid && mongoose.isValidObjectId(sid)) {
-          staffDoc = await Staff.findById(sid).session(session);
-        }
-      }
-      if (!staffDoc) throw new Error("Valid staff (employeeCode/staffId) required for admin-created buyer");
-    } else {
-      // Buyer or anonymous self-registration: must provide a valid employeeCode
-      if (!employeeCodeFromBody) {
-        throw new Error("employeeCode is required to link buyer to staff");
-      }
-      staffDoc = await Staff.findOne({ employeeCode: String(employeeCodeFromBody).trim() }).session(session);
-      if (!staffDoc) throw new Error("Invalid employeeCode (staff not found)");
+    // 1) Resolve staff: prefer logged-in staff, else fallback to provided staffId/employeeCode
+    let staff = await getStaffFromRequest(req, session);
+    if (!staff && staffId) staff = await Staff.findById(staffId).session(session);
+    if (!staff && employeeCode) {
+      staff = await Staff.findOne({ employeeCode: String(employeeCode).trim() }).session(session);
+    }
+    if (!staff) {
+      await session.abortTransaction(); session.endSession();
+      return res.status(400).json({ message: "Staff not resolved. Login as staff or provide valid employeeCode/staffId." });
     }
 
-    // At this point, staffDoc is guaranteed real & exists
-    const realEmployeeCode = staffDoc.employeeCode;
+    // 2) Address normalize
+    const addr = maybeJSON(shopAddress) || (typeof shopAddress === "string"
+      ? { line1: shopAddress, state, city, postalCode, country }
+      : shopAddress);
+    if (!addr || !addr.line1 || !addr.state || !addr.city || !addr.postalCode) {
+      await session.abortTransaction(); session.endSession();
+      return res.status(400).json({ message: "shopAddress must include line1, state, city, postalCode" });
+    }
 
-    // -------- Ensure User with role='buyer' --------
+    // 3) Avoid duplicate Buyer
     const emailNorm = email ? String(email).trim().toLowerCase() : undefined;
+    const dup = await Buyer.findOne({
+      $or: [{ mobile }, ...(emailNorm ? [{ email: emailNorm }] : [])]
+    }).session(session);
+    if (dup) {
+      await session.abortTransaction(); session.endSession();
+      return res.status(409).json({ message: "Buyer already exists with same mobile/email" });
+    }
 
-    let user = await User.findOne({
-      $or: [{ phone }, ...(emailNorm ? [{ email: emailNorm }] : [])],
+    // 4) Find-or-create User for buyer (mobile/email)
+    let buyerUser = await User.findOne({
+      $or: [{ phone: mobile }, ...(emailNorm ? [{ email: emailNorm }] : [])],
     }).session(session);
 
-    if (!user) {
-      const hash = password ? await bcrypt.genSalt(10).then((s) => bcrypt.hash(password, s)) : undefined;
-      user = await User.create(
-        [
-          {
-            name,
-            phone,
-            email: emailNorm,
-            password: hash,
-            role: "buyer",
-            isApproved: true,
-            isActive: true,
-          },
-        ],
-        { session }
-      ).then((a) => a[0]);
+    if (!buyerUser) {
+      const hash = await bcrypt.hash(password || Math.random().toString(36).slice(-8), 10);
+      buyerUser = await User.create([{
+        name,
+        phone: mobile,
+        email: emailNorm,
+        password: hash,
+        role: "buyer",
+        isActive: true,
+      }], { session }).then(a => a[0]);
     } else {
-      // Upgrade/normalize existing user
-      if (user.role !== "buyer") user.role = "buyer";
-      if (!user.phone) user.phone = phone;
-      if (!user.email && emailNorm) user.email = emailNorm;
-      if (!user.name) user.name = name;
-      if (typeof user.isApproved === "undefined") user.isApproved = true;
-      if (typeof user.isActive === "undefined") user.isActive = true;
-      await user.save({ session });
+      if (!buyerUser.name) buyerUser.name = name;
+      if (emailNorm && !buyerUser.email) buyerUser.email = emailNorm;
+      if (!buyerUser.password) buyerUser.password = await bcrypt.hash(password || Math.random().toString(36).slice(-8), 10);
+      if (!buyerUser.role) buyerUser.role = "buyer";
+      await buyerUser.save({ session });
     }
 
-    // -------- Create Buyer (use REAL staff's employeeCode) --------
-    const buyer = new Buyer({
-      employeeCode: realEmployeeCode,
-      registeredBy: registeredBy || staffDoc._id,
-      staffId: staffDoc._id,
-      employee: staffDoc._id, // legacy field
+    // 5) Documents normalize
+    let docs = maybeJSON(documents) ?? documents ?? [];
+    if (!Array.isArray(docs)) docs = [docs];
+    const mappedDocs = docs.filter(Boolean).map(d => ({
+      type: normalizeDocType(d.type),
+      number: d.number,
+      file: toImageObj(d.fileUrl),
+    }));
+
+    // 6) Create Buyer (auto-approved) & link to staff + user
+    const buyerDoc = await Buyer.create([{
+      // ownership
+      staffId: staff._id,
+      staffCode: staff.employeeCode,
+      assignedAt: new Date(),
+      employeeCode: staff.employeeCode, // legacy mirror if used elsewhere
+
+      // user link
+      userId: buyerUser._id,
+
+      // identity
       name,
-      phone,
+      mobile,
       email: emailNorm,
       gender,
+      passwordHash: password ? await bcrypt.hash(password, 10) : undefined,
+
+      // shop
       shopName,
-      shopImage,
-      shopAddress,
-      country: shopAddress?.country || "India",
-      state: shopAddress?.state,
-      city: shopAddress?.city,
-      postalCode: shopAddress?.postalCode,
-      documents,
-      bank,
-      isApproved: Boolean(isApproved) || false,
-      dueAmount: 0,
-      userId: user._id,
-    });
+      shopImage: toImageObj(shopImageUrl),
+      shopAddress: {
+        line1: addr.line1,
+        line2: addr.line2,
+        country: addr.country || country || "India",
+        state: addr.state,
+        city: addr.city,
+        postalCode: addr.postalCode,
+      },
 
-    if (password) {
-      await buyer.setPassword(password);
-    }
+      // mirrors (quick filters)
+      country: addr.country || country || "India",
+      state: addr.state,
+      city: addr.city,
+      postalCode: addr.postalCode,
 
-    await buyer.save({ session });
+      documents: mappedDocs,
+
+      bank: { bankName, branchName, accountHolderName, accountNumber, ifscCode, beneficiaryName },
+
+      // 🚫 No approval flow
+      isApproved: true,
+    }], { session }).then(a => a[0]);
+
+    // Optional auth token if you want to log buyer in immediately
+    const token = generateToken({ id: buyerUser._id, role: buyerUser.role || "buyer" });
+
     await session.commitTransaction();
     session.endSession();
 
-    return res.status(201).json({ ok: true, message: "Buyer created", buyer: makeSafeBuyer(buyer) });
+    return res.status(201).json({
+      message: "Buyer created (auto-linked to staff & user)",
+      buyer: buyerDoc,
+      user: { _id: buyerUser._id, name: buyerUser.name, phone: buyerUser.phone, email: buyerUser.email, role: buyerUser.role },
+      token
+    });
   } catch (err) {
     await session.abortTransaction();
     session.endSession();
@@ -240,264 +199,226 @@ exports.createBuyer = async (req, res) => {
     if (err?.code === 11000) {
       const msg =
         (err.keyPattern?.phone && "Phone already exists") ||
-        (err.keyPattern?.mobile && "Mobile already exists") ||
         (err.keyPattern?.email && "Email already exists") ||
         "Duplicate key";
-      return res.status(409).json({ ok: false, message: "Buyer registration failed", error: msg });
+      return res.status(409).json({ message: msg });
     }
-
-    return res.status(400).json({ ok: false, message: "Buyer registration failed", error: err.message });
+    console.error("createBuyer error:", err);
+    return res.status(500).json({ message: "Failed to create buyer", error: err.message });
   }
 };
 
-/* -------------------------------------------
-   UPDATE BUYER
-   - Staff cannot spoof other staff: employeeCode silently reset to their own
-   - Admin can set employeeCode (validated)
---------------------------------------------*/
+/**
+ * PATCH /buyers/:id
+ * - Replaces docs if provided
+ * - Replaces shopImage if provided (via URL param here)
+ */
 exports.updateBuyer = async (req, res) => {
   try {
-    const { id } = req.params;
-    const payload = { ...req.body };
+    const {
+      name, mobile, email, gender,
+      shopName, shopAddress, country, state, city, postalCode,
+      documents,
+      bankName, branchName, accountHolderName, accountNumber, ifscCode, beneficiaryName,
+      shopImageUrl,
+      password,
+    } = req.body;
 
-    if (isStaff(req)) {
-      // force staff-owned code
-      const staffDoc = await getStaffForReq(req, { required: true });
-      payload.staffId = staffDoc._id;
-      payload.employeeCode = staffDoc.employeeCode;
-    } else if (isAdmin(req)) {
-      // admin may pass employeeCode, validate it
-      if (payload.employeeCode) {
-        const staffDoc = await Staff.findOne({ employeeCode: String(payload.employeeCode).trim() }).select("_id employeeCode");
-        if (!staffDoc) return res.status(400).json({ message: "Invalid employeeCode" });
-        payload.staffId = staffDoc._id;
-        payload.employeeCode = staffDoc.employeeCode;
-      }
+    const up = {};
+    if (name) up.name = name;
+    if (mobile) up.mobile = mobile;
+    if (email) up.email = String(email).trim().toLowerCase();
+    if (gender) up.gender = gender;
+    if (shopName) up.shopName = shopName;
+    if (shopImageUrl) up.shopImage = toImageObj(shopImageUrl);
+
+    // address (object or JSON)
+    const addr = maybeJSON(shopAddress);
+    if (addr && typeof addr === "object") {
+      up.shopAddress = {
+        line1: addr.line1,
+        line2: addr.line2,
+        country: addr.country || country || "India",
+        state: addr.state,
+        city: addr.city,
+        postalCode: addr.postalCode,
+      };
+      up.country = up.shopAddress.country;
+      up.state = up.shopAddress.state;
+      up.city = up.shopAddress.city;
+      up.postalCode = up.shopAddress.postalCode;
     } else {
-      return res.status(403).json({ ok: false, message: "Forbidden" });
+      if (country) up.country = country;
+      if (state) up.state = state;
+      if (city) up.city = city;
+      if (postalCode) up.postalCode = postalCode;
     }
 
-    const buyer = await Buyer.findByIdAndUpdate(id, payload, { new: true });
-    if (!buyer) return res.status(404).json({ message: "Buyer not found" });
-
-    return res.json({ ok: true, message: "Buyer updated", buyer });
-  } catch (err) {
-    return res.status(500).json({ ok: false, message: "Buyer update failed", error: err.message });
-  }
-};
-
-/* -------------------------------------------
-   ASSIGN STAFF
-   - Staff can only assign to themselves
-   - Admin can assign to any valid employeeCode
---------------------------------------------*/
-exports.assignStaff = async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    let staffDoc;
-    if (isStaff(req)) {
-      staffDoc = await getStaffForReq(req, { required: true });
-    } else if (isAdmin(req)) {
-      const { employeeCode } = req.body;
-      if (!employeeCode) return res.status(400).json({ message: "employeeCode required" });
-      staffDoc = await Staff.findOne({ employeeCode: String(employeeCode).trim() }).select("_id employeeCode name");
-      if (!staffDoc) return res.status(400).json({ message: "Invalid employeeCode" });
-    } else {
-      return res.status(403).json({ ok: false, message: "Forbidden" });
+    // password reset
+    if (password) {
+      const salt = await bcrypt.genSalt(10);
+      up.passwordHash = await bcrypt.hash(password, salt);
     }
 
-    const buyer = await Buyer.findByIdAndUpdate(
-      id,
-      { staffId: staffDoc._id, employeeCode: staffDoc.employeeCode },
-      { new: true }
-    );
+    // documents (replace if sent)
+    if (typeof documents !== "undefined") {
+      let docs = maybeJSON(documents) ?? documents ?? [];
+      if (!Array.isArray(docs)) docs = [docs];
+      up.documents = docs.filter(Boolean).map(d => ({
+        type: normalizeDocType(d.type),
+        number: d.number,
+        file: toImageObj(d.fileUrl),
+      }));
+    }
+
+    // bank partial update
+    if (bankName || branchName || accountHolderName || accountNumber || ifscCode || beneficiaryName) {
+      up.bank = {
+        ...(bankName ? { bankName } : {}),
+        ...(branchName ? { branchName } : {}),
+        ...(accountHolderName ? { accountHolderName } : {}),
+        ...(accountNumber ? { accountNumber } : {}),
+        ...(ifscCode ? { ifscCode } : {}),
+        ...(beneficiaryName ? { beneficiaryName } : {}),
+      };
+    }
+
+    const buyer = await Buyer.findByIdAndUpdate(req.params.id, up, { new: true });
     if (!buyer) return res.status(404).json({ message: "Buyer not found" });
 
-    return res.json({
-      ok: true,
-      message: "Staff assigned to buyer",
-      buyer,
-      staff: { _id: staffDoc._id, employeeCode: staffDoc.employeeCode, name: staffDoc.name },
-    });
+    res.json({ message: "Buyer updated", buyer });
   } catch (err) {
-    return res.status(500).json({ ok: false, message: "Failed to assign staff", error: err.message });
+    console.error("updateBuyer error:", err);
+    res.status(500).json({ message: "Failed to update buyer", error: err.message });
   }
 };
 
-/* -------------------------------------------
-   SET ADDRESS
---------------------------------------------*/
-exports.setAddress = async (req, res) => {
+
+
+// 📌 Update Buyer Address
+exports.updateBuyerAddress = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { line1, city, state, postalCode, country = "India" } = req.body;
+    const { id } = req.params; // Buyer._id
+    const { address, city, state, pincode, country = "India", fullAddress } = req.body;
 
-    const buyer = await Buyer.findByIdAndUpdate(
-      id,
-      { shopAddress: { line1: line1 || "", city: city || "", state: state || "", postalCode: postalCode || "", country } },
-      { new: true }
-    );
+    // ✅ Buyer find
+    const buyer = await Buyer.findById(id);
     if (!buyer) return res.status(404).json({ message: "Buyer not found" });
 
-    return res.json({ ok: true, message: "Address saved", buyer });
+    // ✅ Update address fields
+    buyer.shopAddress = {
+      line1: address || buyer.shopAddress?.line1 || "",
+      city: city || buyer.shopAddress?.city || "",
+      state: state || buyer.shopAddress?.state || "",
+      postalCode: pincode || buyer.shopAddress?.postalCode || "",
+      country: country || buyer.shopAddress?.country || "India",
+    };
+
+    // ✅ Optional: Save fullAddress as a separate field
+    if (fullAddress) buyer.fullAddress = fullAddress;
+
+    await buyer.save();
+
+    res.json({ ok: true, message: "Address updated successfully", buyer });
   } catch (err) {
-    return res.status(500).json({ ok: false, message: "Address save failed", error: err.message });
+    console.error("updateBuyerAddress error:", err);
+    res.status(500).json({ message: "Failed to update address", error: err.message });
   }
 };
 
-/* -------------------------------------------
-   GET BUYER (by id)
---------------------------------------------*/
+/**
+ * GET /buyers/:id
+ */
 exports.getBuyerById = async (req, res) => {
   try {
-    const buyer = await Buyer.findById(req.params.id)
-      .populate("staffId", "name employeeCode")
-      .lean();
+    const buyer = await Buyer.findById(req.params.id);
     if (!buyer) return res.status(404).json({ message: "Buyer not found" });
-    return res.json({ ok: true, buyer });
+    res.json(buyer);
   } catch (err) {
-    return res.status(500).json({ ok: false, message: "Failed to fetch buyer", error: err.message });
+    res.status(500).json({ message: "Failed to fetch buyer", error: err.message });
   }
 };
 
-/* -------------------------------------------
-   LIST BUYERS
-   - Staff default: auto-filter to their own buyers unless overridden by admin
---------------------------------------------*/
+/**
+ * GET /buyers
+ * Query:
+ *  - search: text
+ *  - mine=true : only buyers created/owned by logged-in staff
+ *  - page, limit
+ */
 exports.getAllBuyers = async (req, res) => {
   try {
-    const { q, staffCode, staffId, page = 1, limit = 20, active, approved } = req.query;
+    const { search, mine, page = 1, limit = 20 } = req.query;
+    const q = {};
 
-    const pageNum = Math.max(1, toInt(page, 1));
-    const limitNum = Math.max(1, toInt(limit, 20));
-    const skip = (pageNum - 1) * limitNum;
-
-    const filter = {};
-    if (q && String(q).trim()) {
-      const rx = new RegExp(String(q).trim(), "i");
-      filter.$or = [{ name: rx }, { phone: rx }, { email: rx }, { shopName: rx }];
+    if (mine === "true" && (req.user?.role === "staff" || req.auth?.role === "staff")) {
+      const staff = await getStaffFromRequest(req);
+      if (staff) q.$or = [{ staffId: staff._id }, { staffCode: staff.employeeCode }];
+      // If no staff resolved (shouldn't happen for staff role), return empty
+      if (!staff) return res.json({ items: [], total: 0, page: Number(page), pages: 1 });
     }
 
-    if (isStaff(req)) {
-      // staff sees their own buyers by default
-      const staffDoc = await getStaffForReq(req, { required: true });
-      filter.employeeCode = staffDoc.employeeCode;
-    } else if (isAdmin(req)) {
-      // admins can filter by any staff
-      if (staffCode) filter.employeeCode = staffCode;
-      if (staffId && mongoose.isValidObjectId(staffId)) filter.staffId = staffId;
+    if (search) {
+      q.$or = (q.$or || []).concat([
+        { shopName: new RegExp(search, "i") },
+        { name: new RegExp(search, "i") },
+        { mobile: new RegExp(search, "i") },
+        { email: new RegExp(search, "i") },
+      ]);
     }
 
-    if (typeof active !== "undefined") filter.isActive = String(active) === "true";
-    if (typeof approved !== "undefined") filter.isApproved = String(approved) === "true";
-
+    const skip = (Number(page) - 1) * Number(limit);
     const [items, total] = await Promise.all([
-      Buyer.find(filter)
-        .populate("staffId", "name employeeCode")
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limitNum)
-        .lean(),
-      Buyer.countDocuments(filter),
+      Buyer.find(q).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+      Buyer.countDocuments(q),
     ]);
-
-    return res.json({ ok: true, page: pageNum, limit: limitNum, total, items });
+    res.json({ items, total, page: Number(page), pages: Math.max(1, Math.ceil(total / Number(limit))) });
   } catch (err) {
-    return res.status(500).json({ ok: false, message: "Failed to fetch buyers", error: err.message });
+    res.status(500).json({ message: "Failed to fetch buyers", error: err.message });
   }
 };
 
-/* -------------------------------------------
-   DELETE BUYER
---------------------------------------------*/
+/**
+ * DELETE /buyers/:id
+ */
 exports.deleteBuyer = async (req, res) => {
   try {
-    const { id } = req.params;
-    // (optional) Staff can only delete their own buyers — add guard if you want
-    if (isStaff(req)) {
-      const staffDoc = await getStaffForReq(req, { required: true });
-      const b = await Buyer.findOne({ _id: id, staffId: staffDoc._id });
-      if (!b) return res.status(403).json({ ok: false, message: "Forbidden: not your buyer" });
-    }
-    const buyer = await Buyer.findByIdAndDelete(id);
-    if (!buyer) return res.status(404).json({ message: "Buyer not found" });
-    return res.json({ ok: true, message: "Buyer deleted" });
+    const deleted = await Buyer.findByIdAndDelete(req.params.id);
+    if (!deleted) return res.status(404).json({ message: "Buyer not found" });
+    res.json({ message: "Buyer deleted" });
   } catch (err) {
-    return res.status(500).json({ ok: false, message: "Failed to delete buyer", error: err.message });
+    res.status(500).json({ message: "Failed to delete buyer", error: err.message });
   }
 };
 
-/* -------------------------------------------
-   BUYER ORDERS
---------------------------------------------*/
+/**
+ * GET /buyers/:id/orders
+ * (Optional helper) — list all orders for a buyer
+ */
 exports.getBuyerOrders = async (req, res) => {
   try {
-    const buyerId = req.params.id;
-    const { status, page = 1, limit = 20 } = req.query;
-    const skip = (toInt(page, 1) - 1) * toInt(limit, 20);
+    const { id } = req.params;
+    const { status, page = 1, limit = 20, from, to, q } = req.query;
 
-    const q = { buyerId };
-    if (status) q.status = status;
-
-    // (optional guard) staff can only view their own buyer's orders
-    if (isStaff(req)) {
-      const staffDoc = await getStaffForReq(req, { required: true });
-      const check = await Buyer.exists({ _id: buyerId, staffId: staffDoc._id });
-      if (!check) return res.status(403).json({ ok: false, message: "Forbidden: not your buyer" });
+    const filter = { buyerId: id };
+    if (status) filter.status = status;
+    if (from || to) {
+      filter.createdAt = {};
+      if (from) filter.createdAt.$gte = new Date(from);
+      if (to) filter.createdAt.$lte = new Date(to + "T23:59:59.999Z");
+    }
+    if (q) {
+      const regex = new RegExp(q, "i");
+      filter.$or = [{ orderNo: regex }, { buyerName: regex }];
     }
 
+    const skip = (Number(page) - 1) * Number(limit);
     const [items, total] = await Promise.all([
-      Order.find(q)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(toInt(limit, 20))
-        .select("status invoiceUrl totalAmount finalAmount createdAt brandBreakdown")
-        .lean(),
-      Order.countDocuments(q),
+      Order.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)),
+      Order.countDocuments(filter),
     ]);
-
-    return res.json({ ok: true, page: toInt(page, 1), limit: toInt(limit, 20), total, items });
+    res.json({ items, total, page: Number(page), pages: Math.max(1, Math.ceil(total / Number(limit))) });
   } catch (err) {
-    return res.status(500).json({ ok: false, message: "Failed to fetch buyer orders", error: err.message });
+    res.status(500).json({ message: "Failed to fetch buyer orders", error: err.message });
   }
 };
-
-exports.getBuyerOrderById = async (req, res) => {
-  try {
-    const { id: buyerId, orderId } = req.params;
-
-    // (optional guard) staff can only view their own buyer's order
-    if (isStaff(req)) {
-      const staffDoc = await getStaffForReq(req, { required: true });
-      const check = await Buyer.exists({ _id: buyerId, staffId: staffDoc._id });
-      if (!check) return res.status(403).json({ ok: false, message: "Forbidden: not your buyer" });
-    }
-
-    const order = await Order.findOne({ _id: orderId, buyerId })
-      .populate("products.product", "productname brand finalPrice")
-      .populate("sellerId", "brandName")
-      .populate("staffId", "name employeeCode");
-
-    if (!order) return res.status(404).json({ message: "Order not found" });
-
-    const steps = [
-      { key: "confirmed", label: "Confirmed" },
-      { key: "ready-to-dispatch", label: "Packed" },
-      { key: "dispatched", label: "Dispatched" },
-      { key: "delivered", label: "Delivered" },
-    ];
-    const currentIndex = steps.findIndex((s) => s.key === order.status);
-    const timeline = steps.map((s, i) => ({ key: s.key, label: s.label, reached: currentIndex >= i }));
-
-    return res.json({
-      ok: true,
-      order,
-      tracking: { status: order.status, timeline, invoiceUrl: order.invoiceUrl || null },
-    });
-  } catch (err) {
-    return res.status(500).json({ ok: false, message: "Failed to fetch order", error: err.message });
-  }
-};
-
-module.exports._helpers = { getStaffForReq, getBuyerForReq };

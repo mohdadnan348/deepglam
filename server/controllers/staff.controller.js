@@ -1,176 +1,24 @@
-// server/controllers/staff.controller.js
+
 const bcrypt = require("bcryptjs");
 const mongoose = require("mongoose");
-const dayjs = require("dayjs");
 
+// Models
 const Staff = require("../models/staff.model");
 const Attendance = require("../models/attendance.model");
+//const Order = require("../models/order.model");
 const Buyer = require("../models/buyer.model");
 const User = require("../models/user.model");
 const Order = require("../models/order.model");
-const Product = require("../models/product.model"); 
-const Seller = require("../models/seller.model");   
+const Product = require("../models/product.model"); // optional (single product name ke liye)
+const Seller = require("../models/seller.model");   // seller populate ke liye
 
+const PaymentReceipt = require("../models/paymentReceipt.model");
 
+const generateBillPDF = require("../utils/generateBillPDF");
 
-//const Order = require("../models/order.model");
-const Invoice = require("../models/invoice.model");
-const { createDynamicQR } = require("../utils/paytm");
-const { generateBillPDF } = require("../utils/generateBillPDF");
-
-const saveBufferLocally = (buf, filename, folder = "invoices") => {
-  const dir = path.join(__dirname, "..", "uploads", folder);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const file = path.join(dir, `${filename}.pdf`);
-  fs.writeFileSync(file, buf);
-  return { url: `/uploads/${folder}/${filename}.pdf`, path: file };
-};
-
-const markReadyToDispatch = async (req, res) => {
-  const session = await mongoose.startSession();
-  try {
-    const role = req.user?.role || req.auth?.role;
-    if (!["staff", "seller", "admin", "superadmin"].includes(role)) {
-      return res.status(403).json({ ok: false, message: "Forbidden" });
-    }
-
-    const { id } = req.params;
-    const { note, courier, awb } = req.body;
-
-    await session.withTransaction(async () => {
-      // 1) Order
-      const order = await Order.findById(id)
-        .populate("buyerId", "name phone email shopAddress")
-        .populate("sellerId", "brandName gstNumber")
-        .populate("products.product", "productname brand")
-        .session(session);
-
-      if (!order) throw new Error("Order not found");
-
-      // Dispatch mark
-      order.status = "dispatched";
-      order.dispatchInfo = { courier, awb, note, at: new Date(), by: req.user?._id };
-      order.logs = order.logs || [];
-      order.logs.push({ at: new Date(), by: req.user?._id, action: "DISPATCHED", note });
-      await order.save({ session });
-
-      // 2) Create Invoice
-      const invoiceNumber = order.orderNo ? `INV-${order.orderNo}` : `INV-${Date.now()}`;
-      const items = (order.products || []).map((p) => {
-        const pricePaise = Math.round(Number(p.price || 0) * 100);
-        const qty = Number(p.quantity || 1);
-        return {
-          productId: p.product?._id,
-          name: p.product?.productname || p.productName || "Item",
-          qty,
-          unitPricePaise: pricePaise,
-          lineTotalPaise: qty * pricePaise,
-          gstPercentage: order.gstRate || 0,
-          gstPaise: Math.round((order.gstAmount || 0) * 100),
-        };
-      });
-
-      const subtotalPaise = items.reduce((s, i) => s + (i.unitPricePaise * i.qty), 0);
-      const discountTotalPaise = Math.round(Number(order.discountAmount || 0) * 100);
-      const gstTotalPaise = Math.round(Number(order.gstAmount || 0) * 100);
-      const grandTotalPaise = Math.round(Number(order.finalAmount || 0) * 100);
-
-      let invoice = await Invoice.create([{
-        orderId: order._id,
-        sellerId: order.sellerId._id,
-        buyerId: order.buyerId._id,
-        brand: order.sellerId.brandName,
-        number: invoiceNumber,
-        items,
-        subtotalPaise,
-        discountTotalPaise,
-        gstTotalPaise,
-        grandTotalPaise,
-        balanceDuePaise: grandTotalPaise,
-        status: "unpaid",
-      }], { session }).then(r => r[0]);
-
-      // 3) Paytm Dynamic QR
-      try {
-        const qr = await createDynamicQR({
-          orderId: invoice.number,
-          amountPaise: invoice.balanceDuePaise,
-        });
-        invoice.paytm = qr;
-        await invoice.save({ session });
-      } catch (err) {
-        console.warn("Paytm QR failed:", err.message);
-      }
-
-      // 4) Generate Invoice PDF
-      const lineItems = invoice.items.map((i, idx) => ({
-        sn: idx + 1,
-        name: i.name,
-        qty: i.qty,
-        price: i.unitPricePaise / 100,
-        total: i.lineTotalPaise / 100,
-      }));
-
-      const header = {
-        billNumber: invoice.number,
-        orderId: order._id,
-        date: order.createdAt,
-      };
-
-      const opts = {
-        payment: {
-          qrString: invoice.paytm?.qrData || null,
-          status: invoice.status,
-        },
-        company: {
-          legalName: order.sellerId?.brandName || "Your Brand",
-          gstNumber: order.sellerId?.gstNumber || "",
-        },
-        shipping: {
-          address: order.fullAddress || order?.buyerId?.shopAddress?.line1 || "",
-          city: order.city || order?.buyerId?.shopAddress?.city || "",
-          state: order.state || order?.buyerId?.shopAddress?.state || "",
-          pincode: order.pincode || order?.buyerId?.shopAddress?.postalCode || "",
-          country: order.country || "India",
-        },
-        charges: {
-          totalAmount: subtotalPaise / 100,
-          discountAmount: discountTotalPaise / 100,
-          gstAmount: gstTotalPaise / 100,
-          finalAmount: grandTotalPaise / 100,
-          shipping: Number(order.shippingCharge || 0),
-          roundOff: Number(order.roundOff || 0),
-        },
-      };
-
-      const pdfBuffer = await generateBillPDF(header, lineItems, order.buyerId, order.sellerId, opts);
-
-      const saved = saveBufferLocally(pdfBuffer, `order-${order._id}`);
-      invoice.pdfPath = saved.path;
-      order.invoiceUrl = saved.url;
-
-      await invoice.save({ session });
-      await order.save({ session });
-
-      res.json({
-        ok: true,
-        message: "Order dispatched, invoice generated with Paytm QR",
-        order,
-        invoice,
-      });
-    });
-  } catch (e) {
-    console.error("markReadyToDispatch error:", e);
-    return res.status(400).json({ ok: false, message: e.message });
-  } finally {
-    session.endSession();
-  }
-};
-
-
-// If you use Cloudinary for raw PDFs:
-/*
+// --- Cloudinary raw upload helper (use if you already use cloudinary) ---
 const cloudinary = require("cloudinary").v2;
+// make sure cloudinary.config(...) kahin app bootstrap me set hai
 function uploadRawBuffer(buffer, publicId) {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
@@ -179,7 +27,18 @@ function uploadRawBuffer(buffer, publicId) {
     );
     stream.end(buffer);
   });
-}*/
+}
+
+// --- Local fallback (agar Cloudinary nahi use kar rahe ho) ---
+// const fs = require("fs/promises");
+// const path = require("path");
+// async function uploadRawBuffer(buffer, publicId) {
+//   const filePath = path.join(__dirname, `../public/invoices/${publicId}.pdf`);
+//   await fs.mkdir(path.dirname(filePath), { recursive: true });
+//   await fs.writeFile(filePath, buffer);
+//   return { secure_url: `/invoices/${publicId}.pdf`, url: `/invoices/${publicId}.pdf` };
+// }
+
 
 // ---------- Config ----------
 const OFFICE_LAT = Number(process.env.OFFICE_LAT || 28.6139);
@@ -191,6 +50,15 @@ const SHIFT_END = process.env.SHIFT_END || "18:30";
 // ---------- Helpers ----------
 const ok = (res, data, status = 200) => res.status(status).json({ ok: true, data });
 const fail = (res, error, status = 400) => res.status(status).json({ ok: false, error });
+
+const ensureRole = (req, roles = []) => {
+  const role = req.user?.role || req.auth?.role;
+  if (!role || !roles.includes(role)) {
+    const err = new Error("Forbidden");
+    err.status = 403;
+    throw err;
+  }
+};
 
 const parseHHMM = (hhmm) => {
   const [h, m] = String(hhmm || "").split(":").map(Number);
@@ -215,73 +83,30 @@ const haversineMeters = (lat1, lon1, lat2, lon2) => {
   return R * c;
 };
 
-/**
- * Resolve Staff strictly via the logged-in user:
- * 1) If req.auth.staffId provided (middleware), use it.
- * 2) Else find Staff by { userId: req.user._id }.
- * 3) Throw 404 if not found.
- *//*
+// Resolve staff for current requester
 const getStaffForReq = async (req) => {
-  // fast path if middleware already attached
   if (req.auth?.staffId) {
     const byId = await Staff.findById(req.auth.staffId);
     if (byId) return byId;
   }
-  if (!req.user?._id) {
-    const err = new Error("Unauthorized: user missing");
-    err.status = 401;
-    throw err;
+  if (req.user?._id) {
+    const byUser = await Staff.findOne({ userId: req.user._id });
+    if (byUser) return byUser;
   }
-  const staff = await Staff.findOne({ userId: req.user._id });
-  if (staff) return staff;
-
-  const err = new Error("Staff record not found for current user");
-  err.status = 404;
-  throw err;
-};*/
-// Resolve Staff strictly via logged-in user; fast path via verifyJWT
-const getStaffForReq = async (req) => {
-  // ✅ fast path from verifyJWT (resolveUserEntities)
-  if (req.user?.staffId) {
-    const byId = await Staff.findById(req.user.staffId);
-    if (byId) return byId;
+  if (req.user?.phone) {
+    const byPhone = await Staff.findOne({ phone: req.user.phone });
+    if (byPhone) return byPhone;
   }
-
-  if (!req.user?._id) {
-    const err = new Error("Unauthorized: user missing");
-    err.status = 401;
-    throw err;
+  if (req.user?.email) {
+    const byEmail = await Staff.findOne({ email: req.user.email });
+    if (byEmail) return byEmail;
   }
-
-  // fallback by userId → Staff
-  const staff = await Staff.findOne({ userId: req.user._id });
-  if (staff) return staff;
-
   const err = new Error("Staff record not found for current user");
   err.status = 404;
   throw err;
 };
 
-
-// Optional: seller resolver used in dispatch endpoint
-const getSellerForReq = async (req) => {
-  if (req.auth?.sellerId) {
-    const byId = await Seller.findById(req.auth.sellerId);
-    if (byId) return byId;
-  }
-  if (!req.user?._id) {
-    const err = new Error("Unauthorized: user missing");
-    err.status = 401;
-    throw err;
-  }
-  const seller = await Seller.findOne({ userId: req.user._id });
-  if (seller) return seller;
-
-  const err = new Error("Seller record not found for current user");
-  err.status = 404;
-  throw err;
-};
-
+// Unique employee code like EMA12345
 async function generateRandomEmployeeCode() {
   let code, exists = true;
   while (exists) {
@@ -293,14 +118,26 @@ async function generateRandomEmployeeCode() {
 }
 
 // ---------- Controllers ----------
+// Create Staff + link User (safe)
+// - User: hashed password always
+// - Staff: plain password (Staff model's pre-save will hash)
 const createStaff = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
     const {
-      name, phone, email, password,
-      address, photo, salary, travelAllowance, target, bankDetails,
-      isActive, fcmToken,
+      name,
+      phone,
+      email,        // optional in API; if your User schema requires it, we autogenerate
+      password,     // required
+      address,
+      photo,
+      salary,
+      travelAllowance,
+      target,
+      bankDetails,
+      isActive,
+      fcmToken,
     } = req.body;
 
     if (!name || !phone || !password) {
@@ -309,38 +146,58 @@ const createStaff = async (req, res) => {
     }
 
     const emailNorm = email ? String(email).trim().toLowerCase() : undefined;
+    // If your User schema requires email, use a safe fallback when not provided
     const emailToUse = emailNorm || `${phone}@autogen.local`;
+
+    // Hash only for User (Staff model will hash itself in pre('save'))
     const userHashed = await bcrypt.hash(password, 10);
 
-    // User
+    // 1) Find-or-create User
     let user = await User.findOne({
       $or: [{ phone }, ...(emailNorm ? [{ email: emailNorm }] : [{ email: emailToUse }])],
     }).session(session);
 
     if (!user) {
       const created = await User.create([{
-        name, phone, email: emailToUse, password: userHashed,
-        role: "staff", isActive: true, isApproved: true
+        name,
+        phone,
+        email: emailToUse,
+        password: userHashed,        // hashed for User
+        role: "staff",
+        isActive: true,
+        isApproved: true
       }], { session });
       user = created[0];
     } else {
+      // Ensure role/password/flags present
       if (user.role !== "staff") user.role = "staff";
       if (!user.name) user.name = name;
       if (!user.email) user.email = emailToUse;
-      if (!user.password) user.password = userHashed;
+      if (!user.password) user.password = userHashed;   // set password if missing
       if (typeof user.isApproved === "undefined") user.isApproved = true;
       if (typeof user.isActive === "undefined") user.isActive = true;
       await user.save({ session });
     }
 
-    // Staff
+    // 2) Create Staff (plain password → Staff model will hash via pre-save)
     const employeeCode = await generateRandomEmployeeCode();
 
     const staffDocs = await Staff.create([{
-      name, phone, email: emailNorm, password, address, photo,
-      salary, travelAllowance, target, bankDetails,
+      name,
+      phone,
+      email: emailNorm,          // can be undefined; not required here
+      password,                  // PLAIN here (pre-save in Staff will hash)
+      address,
+      photo,
+      salary,
+      travelAllowance,
+      target,
+      bankDetails,
       isActive: typeof isActive === "boolean" ? isActive : true,
-      fcmToken, role: "staff", userId: user._id, employeeCode,
+      fcmToken,
+      role: "staff",
+      userId: user._id,
+      employeeCode,
     }], { session });
 
     const staff = staffDocs[0];
@@ -349,11 +206,17 @@ const createStaff = async (req, res) => {
     session.endSession();
 
     return res.status(201).json({
-      ok: true, message: "Staff & User created/linked successfully",
-      data: { staff, user: { _id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role } }
+      ok: true,
+      message: "Staff & User created/linked successfully",
+      data: {
+        staff,
+        user: { _id: user._id, name: user.name, phone: user.phone, email: user.email, role: user.role }
+      }
     });
   } catch (e) {
-    await session.abortTransaction(); session.endSession();
+    await session.abortTransaction();
+    session.endSession();
+
     if (e?.code === 11000) {
       const msg =
         (e.keyPattern?.phone && "Phone already exists") ||
@@ -366,19 +229,28 @@ const createStaff = async (req, res) => {
   }
 };
 
+
+// List / search staff
 const getAllStaff = async (req, res) => {
   try {
     const { search, role, isActive } = req.query;
     const filter = {};
+
     if (search) {
       const regex = new RegExp(search, "i");
-      filter.$or = [{ name: regex }, { phone: regex }, { email: regex }, { employeeCode: regex }];
+      filter.$or = [
+        { name: regex },
+        { phone: regex },
+        { email: regex },
+        { employeeCode: regex },
+      ];
     }
     if (role) filter.role = role;
     if (isActive !== undefined) filter.isActive = isActive === "true";
 
     const staffList = await Staff.find(filter).sort({ createdAt: -1 }).select("-password");
     const total = await Staff.countDocuments(filter);
+
     return ok(res, { total, items: staffList });
   } catch (err) {
     return fail(res, err.message || "Failed to fetch staff", 500);
@@ -400,9 +272,11 @@ const updateStaff = async (req, res) => {
   try {
     const { id } = req.params;
     const updates = { ...req.body };
+
     if (updates.employeeCode && !/^EMA\d{5}$/.test(updates.employeeCode)) {
       return fail(res, "employeeCode must be like EMA00001", 400);
     }
+
     const staff = await Staff.findByIdAndUpdate(id, updates, { new: true });
     if (!staff) return fail(res, "Staff not found", 404);
     return ok(res, staff);
@@ -416,9 +290,10 @@ const updateStaff = async (req, res) => {
   }
 };
 
-// ------- Staff KPIs -------
+// Summary (counts + amounts + today)
 const mySummary = async (req, res) => {
   try {
+    ensureRole(req, ["staff"]);
     const staff = await getStaffForReq(req);
 
     const { from, to } = req.query;
@@ -441,22 +316,29 @@ const mySummary = async (req, res) => {
         $group: {
           _id: null,
           totalOrders: { $sum: 1 },
-          confirmed:   { $sum: { $cond: [{ $eq: ["$status", "confirmed"] }, 1, 0] } },
-          rtd:         { $sum: { $cond: [{ $eq: ["$status", "ready-to-dispatch"] }, 1, 0] } },
-          dispatched:  { $sum: { $cond: [{ $eq: ["$status", "dispatched"] }, 1, 0] } },
-          delivered:   { $sum: { $cond: [{ $eq: ["$status", "delivered"] }, 1, 0] } },
-          cancelled:   { $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] } },
-          returned:    { $sum: { $cond: [{ $eq: ["$status", "returned"] }, 1, 0] } },
-          amountTotal:    { $sum: { $ifNull: ["$finalAmount", 0] } },
-          amountReceived: { $sum: { $ifNull: ["$paidAmount", 0] } },
+          confirmed: { $sum: { $cond: [{ $eq: ["$status", "confirmed"] }, 1, 0] } },
+          rtd: { $sum: { $cond: [{ $eq: ["$status", "ready-to-dispatch"] }, 1, 0] } },
+          dispatched: { $sum: { $cond: [{ $eq: ["$status", "dispatched"] }, 1, 0] } },
+          delivered: { $sum: { $cond: [{ $eq: ["$status", "delivered"] }, 1, 0] } },
+          cancelled: { $sum: { $cond: [{ $eq: ["$status", "cancelled"] }, 1, 0] } },
+          returned: { $sum: { $cond: [{ $eq: ["$status", "returned"] }, 1, 0] } },
+          amountTotal: { $sum: { $ifNull: ["$payment.total", 0] } },
+          amountReceived: { $sum: { $ifNull: ["$payment.received", 0] } },
           buyersSet: { $addToSet: "$buyerId" },
         },
       },
       {
         $project: {
           _id: 0,
-          totalOrders: 1, confirmed: 1, rtd: 1, dispatched: 1, delivered: 1, cancelled: 1, returned: 1,
-          amountTotal: 1, amountReceived: 1,
+          totalOrders: 1,
+          confirmed: 1,
+          rtd: 1,
+          dispatched: 1,
+          delivered: 1,
+          cancelled: 1,
+          returned: 1,
+          amountTotal: 1,
+          amountReceived: 1,
           amountPending: { $subtract: ["$amountTotal", "$amountReceived"] },
           uniqueBuyers: { $size: "$buyersSet" },
         },
@@ -470,7 +352,7 @@ const mySummary = async (req, res) => {
     };
 
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-    const todayEnd   = new Date(); todayEnd.setHours(23, 59, 59, 999);
+    const todayEnd = new Date(); todayEnd.setHours(23, 59, 59, 999);
 
     const ordersToday = await Order.countDocuments({
       ...match, createdAt: { $gte: todayStart, $lte: todayEnd },
@@ -482,15 +364,19 @@ const mySummary = async (req, res) => {
   }
 };
 
+// My Buyers (owned by this staff)
 const myBuyers = async (req, res) => {
   try {
+    ensureRole(req, ["staff"]);
     const staff = await getStaffForReq(req);
-    const { q, page = 1, limit = 20 } = req.query;
 
+    const { q, page = 1, limit = 20 } = req.query;
     const filter = { $or: [{ staffId: staff._id }, { staffCode: staff.employeeCode }] };
     if (q) {
       const regex = new RegExp(q, "i");
-      filter.$and = (filter.$and || []).concat([{ $or: [{ name: regex }, { shopName: regex }, { mobile: regex }, { email: regex }] }]);
+      filter.$and = (filter.$and || []).concat([{
+        $or: [{ name: regex }, { shopName: regex }, { mobile: regex }, { email: regex }]
+      }]);
     }
 
     const skip = (Number(page) - 1) * Number(limit);
@@ -505,12 +391,15 @@ const myBuyers = async (req, res) => {
   }
 };
 
+// My Orders (include orders of my buyers)
 const myOrders = async (req, res) => {
   try {
+    ensureRole(req, ["staff"]);
     const staff = await getStaffForReq(req);
 
     const { status, q, page = 1, limit = 20, from, to } = req.query;
 
+    // find my buyers
     const myBuyerIds = await Buyer.find(
       { $or: [{ staffId: staff._id }, { staffCode: staff.employeeCode }] },
       { _id: 1 }
@@ -527,25 +416,26 @@ const myOrders = async (req, res) => {
     };
 
     if (status) filter.status = status;
+
     if (from || to) {
       filter.createdAt = {};
       if (from) filter.createdAt.$gte = new Date(from);
-      if (to)   filter.createdAt.$lte = new Date(to + "T23:59:59.999Z");
+      if (to) filter.createdAt.$lte = new Date(to + "T23:59:59.999Z");
     }
+
     if (q) {
       const regex = new RegExp(q, "i");
-      filter.$and = (filter.$and || []).concat([{ $or: [{ orderNo: regex }] }]);
+      filter.$and = (filter.$and || []).concat([{ $or: [{ orderNo: regex }, { buyerName: regex }] }]);
     }
 
     const skip = (Number(page) - 1) * Number(limit);
     const projection = {
-      orderNo: 1, buyerId: 1, status: 1, createdAt: 1,
-      finalAmount: 1, paidAmount: 1,
+      orderNo: 1, buyerId: 1, buyerName: 1, status: 1,
+      "payment.total": 1, "payment.received": 1, createdAt: 1,
     };
 
     const [items, total] = await Promise.all([
-      Order.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)).select(projection)
-        .populate("buyerId", "name shopName phone"),
+      Order.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit)).select(projection),
       Order.countDocuments(filter),
     ]);
 
@@ -555,18 +445,23 @@ const myOrders = async (req, res) => {
   }
 };
 
+// Orders count (total • monthly • pending) + optional rangeTotal
 const myOrdersCount = async (req, res) => {
   try {
+    ensureRole(req, ["staff"]);
     const staff = await getStaffForReq(req);
+    if (!staff) return fail(res, "Staff record not found for current user", 404);
 
     const { from, to, month } = req.query;
 
+    // --- include orders of my buyers ---
     const myBuyerIds = await Buyer.find(
       { $or: [{ staffId: staff._id }, { staffCode: staff.employeeCode }] },
       { _id: 1 }
     ).lean();
     const buyerIdList = myBuyerIds.map((b) => b._id);
 
+    // base match for this staff + his buyers
     const baseMatch = {
       $or: [
         { staffId: staff._id },
@@ -576,9 +471,10 @@ const myOrdersCount = async (req, res) => {
       ],
     };
 
+    // month window (YYYY-MM) → [start, end)
     const getMonthWindow = (mStr) => {
       const now = new Date();
-      let y = now.getFullYear(), m = now.getMonth();
+      let y = now.getFullYear(), m = now.getMonth(); // 0-indexed
       if (mStr) {
         const [yy, mm] = mStr.split("-").map((n) => parseInt(n, 10));
         if (yy && mm >= 1 && mm <= 12) { y = yy; m = mm - 1; }
@@ -588,12 +484,17 @@ const myOrdersCount = async (req, res) => {
       return { start, end };
     };
 
-    const { start, end } = getMonthWindow(month);
+    const { start, end } = getMonthWindow(month); // default current month
 
+    // Counts in parallel
     const totalPromise   = Order.countDocuments(baseMatch);
     const monthlyPromise = Order.countDocuments({ ...baseMatch, createdAt: { $gte: start, $lt: end } });
-    const pendingPromise = Order.countDocuments({ ...baseMatch, status: { $in: ["confirmed", "ready-to-dispatch"] } });
+    const pendingPromise = Order.countDocuments({
+      ...baseMatch,
+      status: { $in: ["confirmed", "ready-to-dispatch"] },
+    });
 
+    // Optional custom range total (if from/to provided)
     let rangePromise = undefined;
     if (from || to) {
       const range = {};
@@ -603,18 +504,28 @@ const myOrdersCount = async (req, res) => {
     }
 
     const [total, monthly, pending, rangeTotal] = await Promise.all([
-      totalPromise, monthlyPromise, pendingPromise, rangePromise ?? Promise.resolve(undefined),
+      totalPromise,
+      monthlyPromise,
+      pendingPromise,
+      rangePromise ?? Promise.resolve(undefined),
     ]);
 
-    return ok(res, { employeeCode: staff.employeeCode, total, monthly, pending, ...(rangeTotal !== undefined ? { rangeTotal } : {}) });
+    return ok(res, {
+      employeeCode: staff.employeeCode,
+      total,
+      monthly,
+      pending,
+      ...(rangeTotal !== undefined ? { rangeTotal } : {}),
+    });
   } catch (e) {
     return fail(res, e.message, e.status || 400);
   }
 };
 
-// ------- Attendance -------
+
 const checkIn = async (req, res) => {
   try {
+    ensureRole(req, ["staff"]);
     const { lat, lng } = req.body;
     if (typeof lat !== "number" || typeof lng !== "number") return fail(res, "lat/lng required", 400);
 
@@ -644,9 +555,12 @@ const checkIn = async (req, res) => {
   }
 };
 
+// Attendance: check-out
 const checkOut = async (req, res) => {
   try {
+    ensureRole(req, ["staff"]);
     const { lat, lng } = req.body;
+
     const staff = await getStaffForReq(req);
 
     const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
@@ -668,21 +582,59 @@ const checkOut = async (req, res) => {
   }
 };
 
+// Attendance: monthly list
 const myAttendance = async (req, res) => {
   try {
+    ensureRole(req, ["staff"]);
     const staff = await getStaffForReq(req);
+
     const { month } = req.query; // YYYY-MM
     const start = month ? new Date(`${month}-01T00:00:00.000Z`) : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
     const end = new Date(start); end.setMonth(end.getMonth() + 1);
+
     const list = await Attendance.find({ staffId: staff._id, date: { $gte: start, $lt: end } }).sort({ date: 1 });
     return ok(res, list);
   } catch (e) {
     return fail(res, e.message, e.status || 400);
   }
 };
-
-// ------- Dispatch + Invoice -------
 /*
+// Ready to dispatch
+const markReadyToDispatch = async (req, res) => {
+  try {
+    const role = req.user?.role || req.auth?.role;
+    if (!["staff", "seller", "admin", "superadmin"].includes(role)) return fail(res, "Forbidden", 403);
+
+    const { id } = req.params;
+    const { note, courier, awb } = req.body;
+
+    const order = await Order.findById(id);
+    if (!order) return fail(res, "Order not found", 404);
+
+    if (role === "staff") {
+      const staff = await getStaffForReq(req);
+      // ensure ownership
+      if (
+        String(order.staffId || "") !== String(staff._id) &&
+        order.staffCode !== staff.employeeCode &&
+        String(order.createdBy || "") !== String(staff._id)
+      ) {
+        return fail(res, "Forbidden for this order", 403);
+      }
+    }
+
+    order.status = "ready-to-dispatch";
+    order.dispatchInfo = { courier, awb, note, at: new Date(), by: req.user?._id };
+    order.logs = order.logs || [];
+    order.logs.push({ at: new Date(), by: req.user?._id, action: "READY_TO_DISPATCH", note });
+    await order.save();
+
+    return ok(res, order);
+  } catch (e) {
+    return fail(res, e.message, e.status || 400);
+  }
+};
+*//*
 const markReadyToDispatch = async (req, res) => {
   try {
     const role = req.user?.role || req.auth?.role;
@@ -693,6 +645,7 @@ const markReadyToDispatch = async (req, res) => {
     const { id } = req.params;
     const { note, courier, awb } = req.body;
 
+    // populate for invoice fields that exist in your schema
     const order = await Order.findById(id)
       .populate("buyerId", "name phone email")
       .populate("sellerId", "brandName")
@@ -700,8 +653,10 @@ const markReadyToDispatch = async (req, res) => {
 
     if (!order) return fail(res, "Order not found", 404);
 
+    // ----- staff ownership (with first-claim fallback) -----
     if (role === "staff") {
       const staff = await getStaffForReq(req);
+
       const hasOwner = !!order.staffId || !!order.staffCode || !!order.createdBy;
       const belongs =
         String(order.staffId || "") === String(staff._id) ||
@@ -712,34 +667,22 @@ const markReadyToDispatch = async (req, res) => {
         order.staffId = staff._id;
         order.staffCode = staff.employeeCode;
         order.createdBy = req.user?._id;
-        await order.save();
       } else if (!belongs) {
         return fail(res, "Forbidden for this order", 403);
       }
-    } else if (role === "seller") {
-      // Optional: ensure only the owner seller dispatches
-      const seller = await getSellerForReq(req);
-      const hasSeller = !!order.sellerId;
-      const belongs = hasSeller && String(order.sellerId) === String(seller._id);
-
-      if (!hasSeller) {
-        order.sellerId = seller._id;
-        await order.save();
-      } else if (!belongs) {
-        return fail(res, "Forbidden for this order (different seller)", 403);
-      }
     }
 
-    // mark dispatched
+    // ----- update order to dispatched -----
     order.status = "dispatched";
     order.dispatchInfo = { courier, awb, note, at: new Date(), by: req.user?._id };
     order.logs = order.logs || [];
     order.logs.push({ at: new Date(), by: req.user?._id, action: "DISPATCHED", note });
     await order.save();
 
-    // build invoice payload
+    // ----- build invoice payload -----
     const lineItems = (order.products || []).map((li, idx) => ({
       sn: idx + 1,
+      // products[] doesn’t carry productId in your schema, so use single `product` name for all rows
       name: order.product?.productname || `Item ${idx + 1}`,
       qty: Number(li.quantity || 1),
       price: Number(li.price || 0),
@@ -749,7 +692,9 @@ const markReadyToDispatch = async (req, res) => {
     const payload = {
       orderId: order._id,
       date: order.createdAt,
-      buyer: order.buyerId ? { name: order.buyerId.name, phone: order.buyerId.phone, email: order.buyerId.email } : null,
+      buyer: order.buyerId
+        ? { name: order.buyerId.name, phone: order.buyerId.phone, email: order.buyerId.email }
+        : null,
       seller: order.sellerId ? { brandName: order.sellerId.brandName } : null,
       address: {
         fullAddress: order.fullAddress,
@@ -768,9 +713,10 @@ const markReadyToDispatch = async (req, res) => {
       dispatch: { courier, awb, note, at: order.dispatchInfo?.at },
     };
 
-    const pdfBuffer = await generateBillPDF(payload);
-    const publicId = `invoices/order-${String(order._id)}`;
-    const uploaded = await uploadRawBuffer(pdfBuffer, publicId);
+    // ----- generate + upload PDF -----
+    const pdfBuffer = await generateBillPDF(payload);           // returns Buffer
+    const publicId = `invoices/order-${String(order._id)}`;     // path/key
+    const uploaded = await uploadRawBuffer(pdfBuffer, publicId); // -> { url / secure_url }
 
     order.invoiceUrl = uploaded.secure_url || uploaded.url || order.invoiceUrl;
     await order.save();
@@ -780,169 +726,121 @@ const markReadyToDispatch = async (req, res) => {
     console.error("markReadyToDispatch error:", e);
     return fail(res, e.message, e.status || 400);
   }
-};*/
+};
+*/
 
-// ------- Dispatch + Invoice -------
-/*
- const markReadyToDispatch = async (req, res) => {
+const markReadyToDispatch = async (req, res) => {
   try {
     const role = req.user?.role || req.auth?.role;
     if (!["staff", "seller", "admin", "superadmin"].includes(role)) {
-      return res.status(403).json({ ok: false, message: "Forbidden" });
+      return fail(res, "Forbidden", 403);
     }
 
     const { id } = req.params;
     const { note, courier, awb } = req.body;
 
-    // order + minimal populate (buyer/seller basic + product name)
+    // pull all data needed for invoice
     const order = await Order.findById(id)
-      .populate("buyerId", "name phone email shopAddress")
-      .populate("sellerId", "brandName gstNumber")
-      .populate("products.product", "productname brand")
-      .populate("staffId", "name employeeCode");
+      .populate("buyerId", "name phone email")      // User
+      .populate("sellerId", "brandName")            // Seller
+      .populate("product", "productname");          // Product (optional)
 
-    if (!order) {
-      return res.status(404).json({ ok: false, message: "Order not found" });
-    }
+    if (!order) return fail(res, "Order not found", 404);
 
-    // ---- STAFF OWNERSHIP (agar creator/owner set nahi hai to current staff set kar do) ----
+    // ---- Staff ownership guard (with auto-claim if owner is empty) ----
     if (role === "staff") {
-      // yahan apna helper laga lo agar hai (getStaffForReq). Nahi hai to token se:
-      const staffId = req.user?.staffId;
-      const employeeCode = req.user?.employeeCode;
+      const staff = await getStaffForReq(req);
+      if (!staff) return fail(res, "Forbidden", 403);
 
       const hasOwner = !!order.staffId || !!order.staffCode || !!order.createdBy;
       const belongs =
-        (order.staffId && String(order.staffId._id || order.staffId) === String(staffId)) ||
-        (employeeCode && order.staffCode === employeeCode) ||
-        (order.createdBy && String(order.createdBy) === String(req.user?._id));
+        String(order.staffId || "") === String(staff._id) ||
+        order.staffCode === staff.employeeCode ||
+        String(order.createdBy || "") === String(staff._id);
 
       if (!hasOwner) {
-        if (staffId) order.staffId = staffId;
-        if (employeeCode) order.staffCode = employeeCode;
+        // claim it for this staff
+        order.staffId = staff._id;
+        order.staffCode = staff.employeeCode;
         order.createdBy = req.user?._id;
         await order.save();
       } else if (!belongs) {
-        return res.status(403).json({ ok: false, message: "Forbidden for this order" });
+        return fail(res, "Forbidden for this order", 403);
       }
     }
 
-    // ---- SELLER OWNERSHIP (optional) ----
-    if (role === "seller") {
-      const sellerId = req.user?.sellerId;
-      const hasSeller = !!order.sellerId;
-      const belongs = hasSeller && String(order.sellerId) === String(sellerId);
-
-      if (!hasSeller) {
-        if (!sellerId) {
-          return res.status(400).json({ ok: false, message: "Seller not found in token" });
-        }
-        order.sellerId = sellerId;
-        await order.save();
-      } else if (!belongs) {
-        return res.status(403).json({ ok: false, message: "Forbidden (different seller)" });
-      }
-    }
-
-    // ---- Mark dispatched + dispatch log ----
+    // ---- Mark as dispatched & log ----
     order.status = "dispatched";
     order.dispatchInfo = { courier, awb, note, at: new Date(), by: req.user?._id };
     order.logs = order.logs || [];
-    order.logs.push({ at: new Date(), by: req.user?._id, action: "DISPATCHED", note });
+    order.logs.push({
+      at: new Date(),
+      by: req.user?._id,
+      action: "DISPATCHED",
+      note
+    });
     await order.save();
 
-    // ///////////////////////////////
-    //     INVOICE PDF GENERATION
-    // ///////////////////////////////
-
-    // (optional) Paytm QR
-    // let paytmQR = null;
-    // try {
-    //   paytmQR = await createDynamicQR({
-    //     orderId: String(order._id),
-    //     amountPaise: Math.round(Number(order.finalAmount || 0) * 100),
-    //   });
-    // } catch (e) {
-    //   console.warn("Paytm QR failed:", e.message);
-    // }
-
-    // Line items
+    // ---- Build invoice payload for PDF ----
     const lineItems = (order.products || []).map((li, idx) => ({
       sn: idx + 1,
-      name:
-        li?.product?.productname ||
-        li?.productName ||
-        `Item ${idx + 1}`,
+      name: order.product?.productname || `Item ${idx + 1}`, // fallback if you track one product separately
       qty: Number(li.quantity || 1),
       price: Number(li.price || 0),
       total: Number(li.total || 0),
-      brand: li?.brand || li?.product?.brand,
     }));
 
-    // Meta + options
-    const header = {
-      billNumber: order.orderNo ? `INV-${order.orderNo}` : `INV-${Date.now()}`,
+    const payload = {
       orderId: order._id,
       date: order.createdAt,
-    };
-
-    const opts = {
-      payment: {
-        // qrString: paytmQR?.qrData || null,
-        upi: "merchant@upi",
-        status: order.paymentStatus, // "paid" ho to PAID watermark show
+      buyer: order.buyerId
+        ? { name: order.buyerId.name, phone: order.buyerId.phone, email: order.buyerId.email }
+        : null,
+      seller: order.sellerId ? { brandName: order.sellerId.brandName } : null,
+      address: {
+        fullAddress: order.fullAddress,
+        city: order.city,
+        state: order.state,
+        pincode: order.pincode,
+        country: order.country || "India",
       },
-      company: {
-        legalName: order.sellerId?.brandName || "Your Brand",
-        gstNumber: order.sellerId?.gstNumber || "",
-      },
-      shipping: {
-        address: order.fullAddress || order?.buyerAddressSnapshot?.line1 || order?.buyerId?.shopAddress?.line1 || "",
-        city: order.city || order?.buyerAddressSnapshot?.city || order?.buyerId?.shopAddress?.city || "",
-        state: order.state || order?.buyerAddressSnapshot?.state || order?.buyerId?.shopAddress?.state || "",
-        pincode: order.pincode || order?.buyerAddressSnapshot?.postalCode || order?.buyerId?.shopAddress?.postalCode || "",
-        country: order.country || order?.buyerAddressSnapshot?.country || "India",
-      },
-      charges: {
+      lineItems,
+      totals: {
         totalAmount: Number(order.totalAmount || 0),
         discountAmount: Number(order.discountAmount || 0),
         gstAmount: Number(order.gstAmount || 0),
         finalAmount: Number(order.finalAmount || 0),
-        shipping: Number(order.shippingCharge || 0),
-        roundOff: Number(order.roundOff || 0),
       },
+      dispatch: { courier, awb, note, at: order.dispatchInfo?.at },
     };
 
-    // PDF buffer
-    const pdfBuffer = await generateBillPDF(header, lineItems, order.buyerId, order.sellerId, opts);
+    // ---- Generate PDF (Buffer) ----
+    const pdfBuffer = await generateBillPDF(payload);
 
-    // Upload: Cloudinary first → fallback to local
-    try {
-      const uploaded = await uploadRawBufferToCloudinary(pdfBuffer, {
-        publicId: `order-${String(order._id)}`,
-        folder: "invoices",
-      });
-      order.invoiceUrl = uploaded?.secure_url || uploaded?.url || order.invoiceUrl;
-    } catch (err) {
-      console.error("Cloudinary upload failed. Falling back:", err.message);
-      const local = saveBufferLocally(pdfBuffer, `order-${String(order._id)}`, "invoices");
-      order.invoiceUrl = local.url; // e.g. /uploads/invoices/order-xxxx.pdf
-    }
+    // ---- Upload PDF & save invoiceUrl ----
+    // Replace this helper with your Cloudinary/S3 uploader.
+    // It should accept a Buffer and return { url / secure_url }.
+    const publicId = `order-${order._id}`;
+    const uploaded = await uploadRawBuffer(pdfBuffer, publicId, {
+      folder: "invoices",           // optional
+      filename: `invoice-${order._id}.pdf`,
+      contentType: "application/pdf"
+    });
 
+    order.invoiceUrl = uploaded.secure_url || uploaded.url || order.invoiceUrl;
     await order.save();
 
-    return res.json({ ok: true, message: "Order dispatched & invoice generated", order });
+    return ok(res, order);
   } catch (e) {
     console.error("markReadyToDispatch error:", e);
-    return res.status(400).json({ ok: false, message: e.message });
+    return fail(res, e.message, e.status || 400);
   }
 };
-*/
 
-// ------- Payments -------
 const pendingPaymentsByStaff = async (req, res) => {
   try {
     const staff = await getStaffForReq(req);
+    if (!staff) return res.status(404).json({ ok: false, error: 'Staff not found' });
 
     const page  = Math.max(1, Number(req.query.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
@@ -957,15 +855,16 @@ const pendingPaymentsByStaff = async (req, res) => {
       ],
     };
 
+    // pipeline to group dues per buyer
     const base = [
       { $match: matchOrders },
       {
         $project: {
           buyerId: 1,
           createdAt: 1,
-          paymentTotal:    { $ifNull: ["$finalAmount", 0] },
-          paymentReceived: { $ifNull: ["$paidAmount", 0] },
-          lastPaymentAt:   { $ifNull: ["$payment.lastReceivedAt", null] },
+          paymentTotal: { $ifNull: ["$payment.total", 0] },
+          paymentReceived: { $ifNull: ["$payment.received", 0] },
+          lastPaymentAt: { $ifNull: ["$payment.lastReceivedAt", null] },
         },
       },
       {
@@ -976,15 +875,25 @@ const pendingPaymentsByStaff = async (req, res) => {
           balance: { $subtract: ["$paymentTotal", "$paymentReceived"] },
         },
       },
-      { $group: {
+      {
+        $group: {
           _id: "$buyerId",
           pending: { $sum: "$balance" },
           lastInvoiceAt: { $max: "$createdAt" },
           lastPaymentAt: { $max: "$lastPaymentAt" },
-      }},
+        },
+      },
       { $match: { pending: { $gt: 0 } } },
+      // optional aging filter AFTER group (because we have lastInvoiceAt now)
       ...(sinceDate ? [{ $match: { lastInvoiceAt: { $lte: sinceDate } } }] : []),
-      { $lookup: { from: "buyers", localField: "_id", foreignField: "_id", as: "buyer" } },
+      {
+        $lookup: {
+          from: "buyers",           // ⚠️ collection name must match your Buyer collection
+          localField: "_id",
+          foreignField: "_id",
+          as: "buyer",
+        },
+      },
       { $unwind: { path: "$buyer", preserveNullAndEmptyArrays: true } },
       {
         $project: {
@@ -1007,13 +916,17 @@ const pendingPaymentsByStaff = async (req, res) => {
       { $sort: { dueAmount: -1 } },
     ];
 
+    const countPipeline = [...base, { $count: "total" }];
+    const listPipeline  = [...base, { $skip: (page - 1) * limit }, { $limit: limit }];
+
     const [rows, countArr] = await Promise.all([
-      Order.aggregate([...base, { $skip: (page - 1) * limit }, { $limit: limit }]),
-      Order.aggregate([...base, { $count: "total" }]),
+      Order.aggregate(listPipeline),
+      Order.aggregate(countPipeline),
     ]);
 
     const total = countArr?.[0]?.total || 0;
     const hasMore = page * limit < total;
+
     return res.json({ ok: true, items: rows, total, hasMore });
   } catch (e) {
     const code = e.status || 400;
@@ -1021,61 +934,98 @@ const pendingPaymentsByStaff = async (req, res) => {
   }
 };
 
+
+
+// Collect Payment from Buyer
 const collectPayment = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
     const { orderId, amount, method, reference, note } = req.body;
-    const staff = await getStaffForReq(req);
+    const staffId = req.user.id; // assuming staff is logged in
 
+    // 1. Find order
     const order = await Order.findById(orderId).session(session);
     if (!order) throw new Error("Order not found");
 
-    const amt = Math.max(0, Number(amount || 0));
+    // 2. Create payment receipt
+    const receipt = await PaymentReceipt.create(
+      [
+        {
+          orderId,
+          buyerId: order.buyerId,
+          staffId,
+          staffCode: order.staffCode,
+          amount,
+          method,
+          reference,
+          note,
+        },
+      ],
+      { session }
+    );
 
-    const receipt = await PaymentReceipt.create([{
+    // 3. Update buyer currentDue
+    await User.findByIdAndUpdate(
+      order.buyerId,
+      { $inc: { currentDue: -Number(amount) } },
+      { session }
+    );
+
+    // 4. Update order payment status
+    let newPaid = (order.paidAmount || 0) + Number(amount);
+    let paymentStatus =
+      newPaid >= order.totalAmount ? "paid" : "partially_paid";
+
+    await Order.findByIdAndUpdate(
       orderId,
-      buyerId: order.buyerId,
-      staffId: staff._id,
-      staffCode: staff.employeeCode,
-      amount: amt,
-      method,
-      reference,
-      note,
-    }], { session });
+      { $set: { paidAmount: newPaid, paymentStatus } },
+      { session }
+    );
 
-    try {
-      await Buyer.findByIdAndUpdate(order.buyerId, { $inc: { currentDue: -amt } }, { session });
-    } catch (_) { /* ignore if field not present */ }
+    await session.commitTransaction();
+    session.endSession();
 
-    const newPaid = (order.paidAmount || 0) + amt;
-    const gross   = (order.finalAmount || order.totalAmount || 0);
-    const paymentStatus = newPaid >= gross ? "paid" : "partial";
-
-    await Order.findByIdAndUpdate(orderId, { $set: { paidAmount: newPaid, paymentStatus } }, { session });
-
-    await session.commitTransaction(); session.endSession();
-    res.status(200).json({ ok: true, message: "Payment collected successfully", receipt: receipt[0] });
+    res.status(200).json({
+      ok: true,
+      message: "Payment collected successfully",
+      receipt: receipt[0],
+    });
   } catch (error) {
-    await session.abortTransaction(); session.endSession();
+    await session.abortTransaction();
+    session.endSession();
     res.status(500).json({ ok: false, error: error.message });
   }
 };
 
-// Targets & Sales report
+
+
+// helper: month date range
 function monthRange(year, month) {
   const start = dayjs().year(year).month(month - 1).startOf("month").toDate();
   const end   = dayjs().year(year).month(month - 1).endOf("month").toDate();
   return { start, end };
 }
+
+/**
+ * POST /api/staff/:staffId/target
+ * Body: { amount }
+ * Sets/updates single rolling target
+ */
 const setTarget = async (req, res) => {
   try {
     const { staffId } = req.params;
     const { amount } = req.body;
-    if (amount == null) return res.status(400).json({ message: "amount required" });
+    if (amount == null) {
+      return res.status(400).json({ message: "amount required" });
+    }
 
-    const staff = await Staff.findByIdAndUpdate(staffId, { $set: { target: Number(amount) } }, { new: true });
+    const staff = await Staff.findByIdAndUpdate(
+      staffId,
+      { $set: { target: Number(amount) } },
+      { new: true }
+    );
     if (!staff) return res.status(404).json({ message: "Staff not found" });
 
     return res.json({ ok: true, message: "Target saved", target: staff.target });
@@ -1084,6 +1034,10 @@ const setTarget = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/staff/:staffId/target
+ * Returns current rolling target number
+ */
 const getTarget = async (req, res) => {
   try {
     const { staffId } = req.params;
@@ -1095,13 +1049,17 @@ const getTarget = async (req, res) => {
   }
 };
 
+/**
+ * GET /api/staff/:staffId/sales-report?month=&year=
+ * Uses single `target` and computes ACTUAL for the month from orders
+ */
 const getSalesReport = async (req, res) => {
   try {
     const { staffId } = req.params;
     let { month, year } = req.query;
 
     const now = dayjs();
-    month = Number(month || (now.month() + 1));
+    month = Number(month || (now.month() + 1)); // 1..12
     year  = Number(year  || now.year());
 
     const staff = await Staff.findById(staffId).lean();
@@ -1109,15 +1067,18 @@ const getSalesReport = async (req, res) => {
 
     const { start, end } = monthRange(year, month);
 
+    // ---- IMPORTANT: yahan apne Order field name ke hisab se change karna ho to karo ----
+    // Agar aapke Order schema me staff reference ka naam 'employee' ya 'staff' hai,
+    // to 'staffId' ke bajay woh use karein.
     const match = {
       status: { $in: ["confirmed", "dispatched", "delivered"] },
       createdAt: { $gte: start, $lte: end },
-      staffId: new mongoose.Types.ObjectId(staffId),
+      staffId: new mongoose.Types.ObjectId(staffId), // <-- change this key name if needed
     };
 
     const salesAgg = await Order.aggregate([
       { $match: match },
-      { $group: { _id: null, total: { $sum: "$finalAmount" } } }
+      { $group: { _id: null, total: { $sum: "$finalAmount" } } } // or "$totalAmount"
     ]);
 
     const actual = salesAgg?.[0]?.total || 0;
@@ -1128,7 +1089,10 @@ const getSalesReport = async (req, res) => {
       ok: true,
       staff: { id: staff._id, name: staff.name, employeeCode: staff.employeeCode },
       month, year,
-      target, actual, remaining: Math.max(target - actual, 0), achievedPercent,
+      target,
+      actual,
+      remaining: Math.max(target - actual, 0),
+      achievedPercent,
       range: { start, end }
     });
   } catch (e) {
@@ -1136,7 +1100,7 @@ const getSalesReport = async (req, res) => {
     return res.status(500).json({ message: "Failed to compute sales report", error: e.message });
   }
 };
-
+// ---------- Exports ----------
 module.exports = {
   createStaff,
   getAllStaff,
@@ -1159,5 +1123,5 @@ module.exports = {
   getTarget,
   setTarget,
 
-  _helpers: { getStaffForReq, getSellerForReq, inShift, haversineMeters },
+  _helpers: { getStaffForReq, inShift, haversineMeters },
 };

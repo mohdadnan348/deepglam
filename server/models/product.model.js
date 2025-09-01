@@ -7,7 +7,6 @@ const productSchema = new mongoose.Schema(
       ref: 'User',
       required: true,
     },
-sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller' },
 
     mainCategory: { type: String, required: true },// e.g. "Men"
     subCategory: { type: String, required: true }, // e.g. "Shirts"

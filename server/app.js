@@ -27,7 +27,7 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
  * Route imports
  * --------------------------- */
 const authRoutes = require("./routes/auth.routes");
-//const userRoutes = require("./routes/user.routes");
+const userRoutes = require("./routes/user.routes");
 const productRoutes = require("./routes/product.routes");
 const orderRoutes = require("./routes/order.routes");
 const wishlistRoutes = require("./routes/wishlist.routes");
@@ -44,7 +44,7 @@ const buyerRoutes = require("./routes/buyer.routes"); // 👈 added
  * Mount routes (prefixes)
  * --------------------------- */
 app.use("/api/auth", authRoutes);
-//app.use("/api/users", userRoutes);
+app.use("/api/users", userRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/orders", orderRoutes);
 app.use("/api/wishlist", wishlistRoutes);

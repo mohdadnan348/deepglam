@@ -7,14 +7,7 @@ const staffSchema = new mongoose.Schema({
   name:  { type: String, required: true },
   phone: { type: String, required: true, unique: true, trim: true },
   email: { type: String, lowercase: true, trim: true, sparse: true, unique: true },
-  address: {
-  line1: { type: String },
-  line2: { type: String },
-  city: { type: String },
-  state: { type: String },
-  pincode: { type: String },
-  country: { type: String, default: "India" }
-},
+  address: String,
   photo: { url: String, public_id: String },
   salary: { type: Number, default: 0 },
   travelAllowance: { type: Number, default: 0 },

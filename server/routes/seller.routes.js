@@ -4,29 +4,24 @@ const router = express.Router();
 const { verifyJWT } = require("../middlewares/auth.middleware");
 const sellerCtrl = require("../controllers/seller.controller");
 
-// ---------- Create (linked to logged-in user) ----------
+// Create
 router.post("/",  sellerCtrl.createSeller);
 
-// ---------- Seller Dashboard / Products ----------
-router.get("/my/products", verifyJWT, sellerCtrl.getMyProducts);
-router.get("/my/stats", verifyJWT, sellerCtrl.getMyStats);
+// Read
+router.get("/",  sellerCtrl.getAllSellers);
+//router.get("/me",  sellerCtrl.getMySellerProfile);
+router.get("/disapproved",  sellerCtrl.getDisapprovedSellers); // enhanced list
+router.get("/:id",  sellerCtrl.getSellerById);
 
-// ---------- Orders (filters + shortcuts) ----------
-router.get("/my/orders", verifyJWT, sellerCtrl.getMyOrders);
-router.get("/my/orders/today", verifyJWT, sellerCtrl.getMyTodayOrders);
-router.get("/my/orders/cancelled", verifyJWT, sellerCtrl.getMyCancelledOrders);
-router.get("/my/orders/returned", verifyJWT, sellerCtrl.getMyReturnedOrders);
-router.get("/my/orders/delivered", verifyJWT, sellerCtrl.getMyDeliveredOrders);
+// Update
+router.patch("/:id",  sellerCtrl.updateSeller);
+//router.patch("/:id/toggle-active",  sellerCtrl.toggleActive);
 
-// ---------- Profile ----------
-router.get("/profile", verifyJWT, sellerCtrl.getMyProfile);
-//router.patch("/profile", verifyJWT, sellerCtrl.updateMyProfile);
+// Approvals (kept as you asked)
+router.patch("/:sellerId/approve",  sellerCtrl.approveSeller);
+router.patch("/:id/reject",  sellerCtrl.rejectSeller);
 
-// ---------- Admin: Manage Sellers ----------
-router.get("/", sellerCtrl.getAllSellers);
-router.get("/disapproved", sellerCtrl.getDisapprovedSellers);
-router.get("/:id", sellerCtrl.getSellerById); // 👈 keep this at the end
-router.patch("/:sellerId/approve", sellerCtrl.approveSeller);
-router.patch("/:id/reject", sellerCtrl.rejectSeller);
+// Delete
+//router.delete("/:id",  sellerCtrl.deleteSeller);
 
 module.exports = router;

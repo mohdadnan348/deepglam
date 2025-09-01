@@ -1,107 +1,251 @@
+/*// server/models/buyer.model.js
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 
-const int = v => (v == null ? v : Math.round(Number(v) || 0)); // store money in paise
+/* -------------------------
+ * Subdocs
+ * ------------------------- */
+/*
+const imageSchema = new mongoose.Schema(
+  {
+    url: { type: String },
+    public_id: { type: String },
+  },
+  { _id: false }
+);
+/*
+const addressSchema = new mongoose.Schema(
+  {
+    line1: { type: String, required: true }, // shop address line
+    line2: { type: String },
+    country: { type: String,  default: "India" },
+    state: { type: String, required: true },
+    city: { type: String, required: true },
+    postalCode: { type: String,  required: true}, // a.k.a. pincode
+  },
+  { _id: false }
+);
 
+const documentSchema = new mongoose.Schema(
+  {
+    type: {
+      type: String,
+      required: true,
+      enum: [
+        "PAN",
+        "AADHAAR",
+        "UDYAM",
+        "GST",
+        "OTHER",
+      ],
+    },
+    number: { type: String, required: true },
+    file: imageSchema, // uploaded image/pdf (Cloudinary/local)
+  },
+  { _id: false }
+);
+
+const bankSchema = new mongoose.Schema(
+  {
+    bankName: { type: String, required: true }, // dropdown in UI
+    branchName: { type: String, required: true},
+    accountHolderName: { type: String,required: true  },
+    accountNumber: { type: String, required: true },
+    ifscCode: { type: String,  required: true},
+    beneficiaryName: { type: String }, // optional if different from holder
+  },
+  { _id: false }
+);
+
+/* -------------------------
+ * Buyer Schema
+ * ------------------------- */
+/*
 const buyerSchema = new mongoose.Schema(
   {
-    employeeCode: { type: String, required: true },
-    registeredBy: { type: mongoose.Schema.Types.ObjectId, ref: "Staff" },
-    staffId:      { type: mongoose.Schema.Types.ObjectId, ref: "Staff" },
-    employee:     { type: mongoose.Schema.Types.ObjectId, ref: "Staff" },
+    // Employee who registered this buyer
+    employeeCode: { type: String, required: true }, // e.g. EMP001
+    registeredBy: { type: mongoose.Schema.Types.ObjectId, ref: "Staff" }, // optional link to staff
 
+    // Identity / login
     name: { type: String, required: true },
+    mobile: { type: String, required: true,},
+    email: { type: String, trim: true, lowercase: true, index: true },
+    gender: { type: String, enum: ["male", "female", "other"], required: true },
 
-    // ✅ Keep both; ensure uniqueness without breaking old data
-    phone:  { type: String, required: true },                 // primary in app
-    mobile: { type: String, index: true, unique: true, sparse: true }, // mirrors phone
-
-    email:   { type: String, trim: true, lowercase: true, index: true },
-    gender:  { type: String, enum: ["male", "female", "other"], required: true },
-
+    // Password (hashed). Prefer storing in User model, but added here per your request.
     passwordHash: { type: String },
 
+    // Shop
     shopName: { type: String, required: true },
-    shopImage: { url: String, public_id: String },
-    shopAddress: {
-      line1: { type: String, required: true },
-      line2: { type: String },
-      country: { type: String, default: "India" },
-      state:   { type: String, required: true },
-      city:    { type: String, required: true },
-      postalCode: { type: String, required: true }
-    },
+    
+    shopImage: imageSchema,
+    shopAddress:{type: String, required: true },
+     postalCode: { type: String, required: true },
+    // Extra location fields (duplicated for quick filters/search)
+    country: { type: String, required: true, default: "India" },
+    state: { type: String, required: true },
+    city: { type: String, required: true },
+   
 
-    country:    { type: String, default: "India" },
-    state:      { type: String },
-    city:       { type: String },
-    postalCode: { type: String },
+    // Documents (PAN, Aadhaar, Udyam, GST, etc.)
+    documents: [documentSchema],
 
-    documents: [{
-      type:   { type: String, required: true, enum: ["PAN", "AADHAAR", "UDYAM", "GST", "OTHER"] },
-      number: { type: String, required: true },
-      file:   { url: String, public_id: String }
-    }],
+    // Bank details
+    bank: bankSchema,
 
-    bank: {
-      bankName:          { type: String },
-      branchName:        { type: String },
-      accountHolderName: { type: String },
-      accountNumber:     { type: String },
-      ifscCode:          { type: String },
-      beneficiaryName:   { type: String }
-    },
+    // System flags
+    isApproved: { type: Boolean, default: false },
+    dueAmount: { type: Number, default: 0 }, // for payment tracking
 
-    // 🔐 Credit & dues (paise)
-    dueAmountPaise:   { type: Number, set: int, default: 0 },  // source of truth (replace legacy dueAmount)
-    allowCredit:      { type: Boolean, default: false },
-    creditLimitPaise: { type: Number, set: int, default: 0 },
-    riskTier:         { type: String, enum: ["low","medium","high"], default: "low" },
-
-    // Legacy field kept for backward compatibility (mirror of dueAmountPaise in controllers)
-    dueAmount: { type: Number, default: 0 }, // DEPRECATED: keep until all reads migrate
-
-    // Account link
+    // Optional link to user if you keep users separate
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-
-    // Optional flags
-    kycVerified: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
 
-// 🔒 Keep phone & mobile in sync to satisfy unique index on mobile
-buyerSchema.pre("validate", function(next) {
-  const p = this.phone || this.mobile;
-  if (!p || !String(p).trim()) return next(new Error("phone or mobile is required"));
-  this.phone = String(p).trim();
-  this.mobile = String(p).trim();
-  next();
-});
+/* -------------------------
+ * Virtuals / Methods
+ * ------------------------- *//*
 
-// Password helpers
-buyerSchema.methods.setPassword = async function (plain) {
+// Set password safely
+buyerSchema.methods.setPassword = async function setPassword(plain) {
   const salt = await bcrypt.genSalt(10);
   this.passwordHash = await bcrypt.hash(plain, salt);
 };
-buyerSchema.methods.validatePassword = async function (plain) {
+
+// Validate password
+buyerSchema.methods.validatePassword = async function validatePassword(plain) {
   if (!this.passwordHash) return false;
   return bcrypt.compare(plain, this.passwordHash);
 };
 
-// Text search
+/* -------------------------
+ * Indexes
+ * ------------------------- *//*
+
+// Optional compound search index
 buyerSchema.index({
   shopName: "text",
   name: "text",
   email: "text",
+  mobile: "text",
   "shopAddress.line1": "text",
   city: "text",
   state: "text",
   postalCode: "text",
 });
 
-// Fast filters
-buyerSchema.index({ allowCredit: 1, riskTier: 1 });
-buyerSchema.index({ dueAmountPaise: -1 });
+/* ------------------------- */
+/*
+module.exports = mongoose.model("Buyer", buyerSchema);
+*/
+// server/models/buyer.model.js
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+
+/* Subdocs */
+const imageSchema = new mongoose.Schema(
+  { url: String, public_id: String },
+  { _id: false }
+);
+
+
+const addressSchema = new mongoose.Schema(
+  {
+    line1: { type: String, required: true },
+    line2: { type: String },
+    country: { type: String, default: "India" },
+    state: { type: String, required: true },
+    city: { type: String, required: true },
+    postalCode: { type: String, required: true },
+  },
+  { _id: false }
+);
+
+const documentSchema = new mongoose.Schema(
+  {
+    type: {
+      type: String,
+      required: true,
+      enum: ["PAN", "AADHAAR", "UDYAM", "GST", "OTHER"],
+    },
+    number: { type: String, required: true },
+    file: imageSchema,            // 👈 file = { url, public_id }
+  },
+  { _id: false }
+);
+
+const bankSchema = new mongoose.Schema(
+  {
+    bankName: { type: String, required: true },
+    branchName: { type: String, required: true },
+    accountHolderName: { type: String, required: true },
+    accountNumber: { type: String, required: true },
+    ifscCode: { type: String, required: true },
+    beneficiaryName: { type: String },
+  },
+  { _id: false }
+);
+  // 👇 Add these two staff-link fields INSIDE the schema object, with correct commas
+  
+/* Buyer */
+const buyerSchema = new mongoose.Schema(
+  {
+    employeeCode: { type: String, required: true },
+    registeredBy: { type: mongoose.Schema.Types.ObjectId, ref: "Staff" },
+  staffId:   { type: mongoose.Schema.Types.ObjectId, ref: "Staff" }, // preferred link
+    employee:  { type: mongoose.Schema.Types.ObjectId, ref: "Staff" }, // if you want to use populate("employee")
+
+
+    name: { type: String, required: true },
+    mobile: { type: String, required: true },
+    email: { type: String, trim: true, lowercase: true, index: true },
+    gender: { type: String, enum: ["male", "female", "other"], required: true },
+
+    passwordHash: { type: String },
+
+    shopName: { type: String, required: true },
+    shopImage: imageSchema,       // 👈 object
+    shopAddress: addressSchema,   // 👈 object
+
+    // duplicates for quick search (optional—remove required if you don't want double validation)
+    country: { type: String, default: "India" },
+    state: { type: String },
+    city: { type: String },
+    postalCode: { type: String },
+
+    documents: [documentSchema],
+    bank: bankSchema,
+
+    isApproved: { type: Boolean, default: false },
+    dueAmount: { type: Number, default: 0 },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  },
+  { timestamps: true }
+);
+
+/* Methods */
+buyerSchema.methods.setPassword = async function (plain) {
+  const salt = await bcrypt.genSalt(10);
+  this.passwordHash = await bcrypt.hash(plain, salt);
+};
+
+buyerSchema.methods.validatePassword = async function (plain) {
+  if (!this.passwordHash) return false;
+  return bcrypt.compare(plain, this.passwordHash);
+};
+
+/* Indexes */
+buyerSchema.index({
+  shopName: "text",
+  name: "text",
+  email: "text",
+  mobile: "text",
+  "shopAddress.line1": "text", // 👈 now valid
+  city: "text",
+  state: "text",
+  postalCode: "text",
+});
 
 module.exports = mongoose.model("Buyer", buyerSchema);
