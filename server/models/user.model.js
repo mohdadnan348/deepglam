@@ -1,56 +1,45 @@
 const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 
-const userSchema = new mongoose.Schema(
-  {
-    name: { type: String, required: true },
-    phone: { type: String, required: true,  },
-    email: { type: String, required: true, lowercase: true },
-    password: { type: String }, // Optional for OTP-only users
-    role: {
-      type: String,
-      enum: ["buyer", "seller", "staff", "admin"],
-      default: "buyer",
-    },
-
-    // ✅ Buyer-specific fields
-    employeeCode: { type: String }, // Linked staff code
-    gender: { type: String, enum: ["male", "female", "other"] },
-    shopName: { type: String },
-    shopPhoto: {
-      url: { type: String },
-      public_id: { type: String },
-    },
-
-    address: { type: mongoose.Schema.Types.ObjectId, ref: "Address" },
-
-    documentType: { type: String },
-    documentNumber: { type: String },
-    documentImage: {
-      url: { type: String },
-      public_id: { type: String },
-    },
-
-    // ✅ Seller-specific
-    isSellerApproved: { type: Boolean, default: false },
-
-    // ✅ Buyer/Admin common
-    isApproved: { type: Boolean, default: false },
-    isRejected: { type: Boolean, default: false },
-    rejectReason: { type: String },
-
-    // ✅ For OTP login
-    fcmToken: { type: String },
-    otpCode: { type: String },
-    otpExpiresAt: { type: Date },
-
-    // ✅ Financial (for buyer credit tracking)
-    creditLimit: { type: Number, default: 0 },
-    currentDue: { type: Number, default: 0 },
-
-    // ✅ Badge for UI
-    isVerified: { type: Boolean, default: false },
+const userSchema = new mongoose.Schema({
+  // Core identity fields (common to all roles)
+  name: { type: String, required: true },
+  phone: { type: String, required: true, unique: true },
+  email: { type: String, required: true, unique: true, lowercase: true },
+  passwordHash: { type: String },
+  
+  // Role and status
+  role: {
+    type: String,
+    enum: ["buyer", "seller", "staff", "admin"],
+    required: true,
+    index: true
   },
-  { timestamps: true }
-);
+  isActive: { type: Boolean, default: true },
+  isVerified: { type: Boolean, default: false },
+  
+  // OTP fields
+  otpCode: { type: String },
+  otpExpiresAt: { type: Date },
+  fcmToken: { type: String },
+  
+  // Profile reference (role-specific data)
+  profileId: { type: mongoose.Schema.Types.ObjectId, refPath: 'profileModel' },
+  profileModel: {
+    type: String,
+    enum: ['BuyerProfile', 'SellerProfile', 'StaffProfile', 'AdminProfile']
+  }
+}, { timestamps: true });
+
+// Password methods
+userSchema.methods.setPassword = async function(password) {
+  const salt = await bcrypt.genSalt(10);
+  this.passwordHash = await bcrypt.hash(password, salt);
+};
+
+userSchema.methods.validatePassword = async function(password) {
+  if (!this.passwordHash) return false;
+  return bcrypt.compare(password, this.passwordHash);
+};
 
 module.exports = mongoose.model("User", userSchema);

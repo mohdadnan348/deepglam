@@ -36,12 +36,14 @@ exports.verifyJWT = async (req, res, next) => {
     }
 
     // Validate decoded token structure
-    if (!decoded.id) {
+    // OLD: if (!decoded.id) {
+    if (!decoded.userId) {  // ← CHANGED: decoded.id को decoded.userId में change किया
       return res.status(401).json({ ok: false, message: "Invalid token payload" });
     }
 
     // Fetch user from database
-    const user = await User.findById(decoded.id).select("_id role isApproved isActive");
+    // OLD: const user = await User.findById(decoded.id).select("_id role isApproved isActive");
+    const user = await User.findById(decoded.userId).select("_id role isApproved isActive");  // ← CHANGED: decoded.id को decoded.userId में change किया
     if (!user) {
       return res.status(401).json({ ok: false, message: "User not found" });
     }

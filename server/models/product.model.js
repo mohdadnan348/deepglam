@@ -2,75 +2,69 @@ const mongoose = require('mongoose');
 
 const productSchema = new mongoose.Schema(
   {
-    seller: {
+    userId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
       required: true,
     },
-sellerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Seller' },
-
-    mainCategory: { type: String, required: true },// e.g. "Men"
-    subCategory: { type: String, required: true }, // e.g. "Shirts"
-
-    // 👕 Product Type: Formal, Casual, Traditional etc.
+    
+    mainCategory: { type: String, required: true },
+    subCategory: { type: String, required: true },
+    
     productType: {
       type: String,
-      enum: ['formal', 'casual', 'traditional', 'partywear', 'festive', 'ethnic', 'western'],
+      enum: ['Simple', 'Attribute'],
       required: true,
     },
-
-    productname: { type: String, required: true },
-
-    description: { type: String },
-    /*gender: {
-      type: String,
-      enum: ['men', 'women', 'kids', 'unisex'],
-    },
-*/
-    hsnCode: { type: String }, // for GST classification
-
-    MOQ: { type: Number, required: true }, // Minimum Order Quantity
-
+    
+    productName: { type: String, required: true },
+    hsnCode: { type: String }, 
+    brand: { type: String },
+    
+    // Pricing Fields
     purchasePrice: { type: Number, required: true },
-    margin: { type: Number, default: 0 }, // in %
-    mrp: { type: Number }, // Optional
-
+    includedPercentage: { type: Number, default: 0 },
+    price: { type: Number, default: 0 }, 
+    
     discountPercentage: { type: Number, default: 0 },
     discountAmount: { type: Number, default: 0 },
-
-    gstPercentage: { type: Number, default: 0 }, // like 5%, 12%
+    
+    gstPercentage: { type: Number, default: 0 },
     gstAmount: { type: Number, default: 0 },
     gstType: {
       type: String,
       enum: ['inclusive', 'exclusive'],
       default: 'exclusive',
     },
-
-    finalPrice: { type: Number, default: 0 },
-
-    sizes: [{ type: String }],
-    colors: [{ type: String }],
-
+    
+    salePrice: { type: Number, default: 0 },
+    MOQ: { type: Number, required: true },
+    
+    // Variations - Unified structure for both Simple and Attribute
+    variations: [{
+      size: { type: String, required: true },
+      color: { type: String, required: true },
+      pieces: { type: String } // Only for Attribute type
+    }],
+    
+    productDescription: { type: String },
+    
+    // Images
     mainImage: {
       url: String,
       public_id: String,
     },
-    images: [
-      {
-        url: String,
-        public_id: String,
-      },
-    ],
-
-    stock: { type: Number, default: 0 },
-    brand: { type: String },
-
+    images: [{
+      url: String,
+      public_id: String,
+    }],
+    
+    // Status Management
     status: {
       type: String,
-      enum: ['disapproved', 'approved', 'rejected'],
+      enum: ['disapproved', 'Packed', 'approved', 'rejected'],
       default: 'disapproved',
     },
-
     isActive: { type: Boolean, default: true },
   },
   {

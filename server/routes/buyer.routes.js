@@ -1,28 +1,26 @@
-// routes/buyer.routes.js
 const express = require("express");
 const router = express.Router();
 
-const { verifyJWT } = require("../middlewares/auth.middleware");
+const { verifyJWT, requireRole } = require("../middlewares/auth.middleware");
 const buyerCtrl = require("../controllers/buyer.controller");
 
-// Create / Update / Delete / Read
+// ✅ FIXED: Reorder routes to avoid conflicts
+// Create buyer (no auth required for registration)
 router.post("/", buyerCtrl.createBuyer);
-router.get("/", buyerCtrl.getAllBuyers);
-router.get("/:id", buyerCtrl.getBuyerById);
-router.patch("/:id", buyerCtrl.updateBuyer);
-router.delete("/:id", buyerCtrl.deleteBuyer);
 
-// Staff linking
-router.patch("/:id/assign-staff", buyerCtrl.assignStaff);
+// Get all buyers (admin/staff only)
+router.get("/", verifyJWT, requireRole(['admin', 'superadmin', 'staff']), buyerCtrl.getAllBuyers);
 
-// Address
-router.patch("/:id/address", buyerCtrl.setAddress);
+// Get my profile (buyer only - no ID needed)
+router.get("/my", verifyJWT, buyerCtrl.getBuyerProfile);
 
-// Buyer Orders (list + detail)
-router.get("/:id/orders", buyerCtrl.getBuyerOrders);
-router.get("/:id/orders/:orderId", buyerCtrl.getBuyerOrderById);
+// Get specific buyer profile by ID (admin/staff can access any, buyer can access only own)
+router.get("/:id", verifyJWT, buyerCtrl.getBuyerProfile);
 
-// ✅ FIXED - Remove '/buyers' prefix since router is already mounted at '/buyers'
-router.get("/:id/orders-detailed", buyerCtrl.getBuyerOrdersWithDetails);
+// Get buyer orders
+router.get("/:id/orders", verifyJWT, buyerCtrl.getBuyerOrders);
+
+// Update buyer profile
+router.patch("/:id", verifyJWT, buyerCtrl.updateBuyerProfile);
 
 module.exports = router;

@@ -1,22 +1,34 @@
+
+
+
 // routes/order.routes.js
-const express = require('express');
+const express = require("express");
 const router = express.Router();
-const orderController = require('../controllers/order.controller');
+const { verifyJWT, requireRole } = require("../middlewares/auth.middleware");
+const orderCtrl = require("../controllers/order.controller");
 
-// GET all orders
-router.get('/orders', orderController.getAllOrders);
+// ✅ 1. BUYER ROUTES
+router.post("/", verifyJWT, requireRole(["buyer"]), orderCtrl.createOrder);
 
-// POST create new order
-router.post('/orders', orderController.placeOrder);
+// ✅ 2. COMMON ROUTES (All authenticated users)
+router.get("/my", verifyJWT, orderCtrl.getOrders);
+router.get("/:orderId", verifyJWT, orderCtrl.getOrderById);
+router.get("/:orderId/bill", verifyJWT, orderCtrl.getBrandWiseBill);
+router.put("/:orderId/status", verifyJWT, orderCtrl.updateOrderStatus);
+router.delete("/:orderId", verifyJWT, orderCtrl.cancelOrder);
 
-// GET single order by ID
-router.get('/orders/:id', orderController.getOrderById);
+// ✅ 3. SELLER ROUTES
+router.get("/seller/dashboard", verifyJWT, requireRole(["seller"]), orderCtrl.getSellerDashboard);
+router.get("/seller/earnings", verifyJWT, requireRole(["seller"]), orderCtrl.getSellerEarnings);
 
-// PATCH update order status
-router.patch('/orders/:id/status', orderController.updateStatus);
+// ✅ 4. STAFF ROUTES  
+router.get("/staff/dashboard", verifyJWT, requireRole(["staff"]), orderCtrl.getStaffDashboard);
+router.get("/staff/buyers", verifyJWT, requireRole(["staff"]), orderCtrl.getStaffBuyers);
+router.put("/:orderId/payment", verifyJWT, requireRole(["staff", "admin"]), orderCtrl.updatePaymentStatus);
+router.post("/dispatch", verifyJWT, requireRole(["staff", "admin"]), orderCtrl.bulkDispatchOrders);
 
-// Shortcut routes
-router.patch('/orders/:id/pack', orderController.markPacked);
-router.patch('/orders/:id/deliver', orderController.markDelivered);
+// ✅ 5. ADMIN ROUTES
+router.get("/", verifyJWT, requireRole(["admin"]), orderCtrl.getOrders);
+router.put("/bulk", verifyJWT, requireRole(["staff", "admin"]), orderCtrl.bulkUpdateOrders);
 
 module.exports = router;

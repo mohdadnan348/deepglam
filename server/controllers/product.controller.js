@@ -1,130 +1,140 @@
 const mongoose = require('mongoose');
 const Product = require('../models/product.model');
-const Seller  = require('../models/seller.model');
+const User = require('../models/user.model'); 
 
 /* ---------- helpers ---------- */
 const toNum = v => (Number.isFinite(Number(v)) ? Number(v) : 0);
 const toInt = v => Math.round(toNum(v));
-const toStringArray = (v) => {
-  if (!v) return [];
-  if (Array.isArray(v)) return v.map(String).map(s => s.trim()).filter(Boolean);
-  if (typeof v === 'string') {
-    const s = v.trim();
-    try { const arr = JSON.parse(s); if (Array.isArray(arr)) return arr.map(String).map(x=>x.trim()).filter(Boolean); } catch {}
-    return s.split(',').map(x=>x.trim()).filter(Boolean);
-  }
-  return [];
-};
 
-// price calculator
-const calc = ({ price, discountPercentage=0, discountAmount=0, gstPercentage=0, gstType='exclusive' }) => {
-  const _price = toNum(price);
-  const discPctAmt = _price * (toNum(discountPercentage)/100);
-  theDisc = Math.max(toNum(discountAmount), discPctAmt);
-  const afterDisc = Math.max(_price - theDisc, 0);
+// Updated price calculator for new model
+const calc = ({ purchasePrice, includedPercentage=0, discountPercentage=0, discountAmount=0, gstPercentage=0, gstType='exclusive' }) => {
+  const _purchasePrice = toNum(purchasePrice);
+  const _includedPct = toNum(includedPercentage);
+  
+  // Calculate price based on purchasePrice + includedPercentage
+  const basePrice = _purchasePrice + (_purchasePrice * _includedPct / 100);
+  
+  // Apply discount
+  const discPctAmt = basePrice * (toNum(discountPercentage)/100);
+  const theDisc = Math.max(toNum(discountAmount), discPctAmt);
+  const afterDisc = Math.max(basePrice - theDisc, 0);
 
+  // Calculate GST
   const inclusive = String(gstType).toLowerCase() === 'inclusive';
   const gstAmtFloat = inclusive
     ? (afterDisc - (afterDisc / (1 + toNum(gstPercentage)/100)))
     : (afterDisc * toNum(gstPercentage)/100);
 
-  const finalFloat = inclusive ? afterDisc : (afterDisc + gstAmtFloat);
+  const salePrice = inclusive ? afterDisc : (afterDisc + gstAmtFloat);
 
-  const priceAfterDiscount = toInt(afterDisc);
-  const gstAmount          = toInt(gstAmtFloat);
-  const finalPrice         = toInt(finalFloat);
-  const discountApplied    = toInt(theDisc);
-
-  return { priceAfterDiscount, gstAmount, finalPrice, discountApplied };
+  return { 
+    price: Math.round(basePrice * 100) / 100,
+    priceAfterDiscount: Math.round(afterDisc * 100) / 100, 
+    gstAmount: Math.round(gstAmtFloat * 100) / 100, 
+    salePrice: Math.round(salePrice * 100) / 100,
+    discountApplied: Math.round(theDisc * 100) / 100 
+  };
 };
 
 // images
 const toImageObj = (v) => {
   if (!v) return null;
-  if (typeof v === 'string') return { url: v };
-  if (v && typeof v === 'object' && v.url) return { url: v.url };
+  if (typeof v === 'string') return { url: v, public_id: '' };
+  if (v && typeof v === 'object') return { 
+    url: v.url || v.uri || '', 
+    public_id: v.public_id || v.fileName || '' 
+  };
   return null;
 };
+
 const toImageObjArray = (arr) => (Array.isArray(arr) ? arr.map(toImageObj).filter(Boolean) : []);
 
-/** Resolve sellerId strictly from the authenticated user */
-async function resolveSellerId(req) {
-  const userId = req.user?._id || req.user?.id;
-  if (!userId) return null;
-  const seller = await Seller.findOne({ userId }).select('_id');
-  return seller ? String(seller._id) : null;
+// Variations handler
+const processVariations = (simpleVariations, attributeVariations, productType) => {
+  if (productType === 'Simple') {
+    return Array.isArray(simpleVariations) 
+      ? simpleVariations.filter(v => v.size && v.color).map(v => ({
+          size: String(v.size).trim(),
+          color: String(v.color).trim()
+        }))
+      : [];
+  } else if (productType === 'Attribute') {
+    return Array.isArray(attributeVariations)
+      ? attributeVariations.filter(v => v.size && v.color).map(v => ({
+          size: String(v.size).trim(),
+          color: String(v.color).trim(),
+          pieces: v.pieces ? String(v.pieces).trim() : ''
+        }))
+      : [];
+  }
+  return [];
+};
+
+/** ✅ FIXED - Resolve userId from authenticated user */
+function resolveUserId(req) {
+  console.log('🔍 Resolving userId from:', {
+    user: req.user ? { id: req.user._id, role: req.user.role } : 'No user object'
+  });
+  return req.user?._id || req.user?.id || null;
 }
 
 /* ---------------------------------------
-   CREATE PRODUCT (always disapproved initially)
-   - no sellerId in body/header; always derive from token user
+   CREATE PRODUCT
 ----------------------------------------*/
 exports.createProduct = async (req, res) => {
   try {
     const {
-      mainCategory, subCategory, productType, productname,
-      hsnCode, MOQ, purchasePrice, margin = 0,
-      discountPercentage = 0, discountAmount = 0, gstPercentage = 0, gstType = 'exclusive',
-      sizes, colors, brand, stock,
-      // sellerId,  // ❌ ignored now
-      mainImage,
-      images = [],
-      description,
+      mainCategory, subCategory, productType, productName,
+      hsnCode, MOQ, purchasePrice, 
+      includedPercentage = 0,
+      discountPercentage = 0, discountAmount = 0, 
+      gstPercentage = 0, gstType = 'exclusive',
+      simpleVariations, attributeVariations,
+      brand, mainImage, images = [], productDescription,
     } = req.body;
 
-    if (!productname)   return res.status(400).json({ message: 'productname is required' });
-    if (!mainCategory)  return res.status(400).json({ message: 'mainCategory is required' });
-    if (!subCategory)   return res.status(400).json({ message: 'subCategory is required' });
+    // Validation
+    if (!productName) return res.status(400).json({ message: 'productName is required' });
+    if (!mainCategory) return res.status(400).json({ message: 'mainCategory is required' });
+    if (!subCategory) return res.status(400).json({ message: 'subCategory is required' });
     if (purchasePrice === undefined || purchasePrice === null)
       return res.status(400).json({ message: 'purchasePrice is required' });
-    if (!mainImage)     return res.status(400).json({ message: 'mainImage URL is required' });
+    if (!productType) return res.status(400).json({ message: 'productType is required' });
+    if (!mainImage) return res.status(400).json({ message: 'mainImage is required' });
 
-    // 🔒 always resolve seller from logged-in user
-    const sellerId = await resolveSellerId(req);
-    if (!sellerId) return res.status(400).json({ message: 'Seller not found for this user' });
+    // Get userId from authenticated user
+    const userId = resolveUserId(req);
+    if (!userId) return res.status(401).json({ message: 'User not authenticated' });
 
-    // integers & price calculations
-    const purchase   = toInt(purchasePrice);
-    const marginNum  = toNum(margin);
-    const basePrice  = toInt(purchase + (marginNum / 100) * purchase);
-
-    const { priceAfterDiscount, gstAmount, finalPrice, discountApplied } = calc({
-      price: basePrice,
-      discountPercentage,
-      discountAmount,
-      gstPercentage,
-      gstType
+    // Price calculations using new model
+    const { price, priceAfterDiscount, gstAmount, salePrice, discountApplied } = calc({
+      purchasePrice, includedPercentage, discountPercentage, discountAmount, gstPercentage, gstType
     });
 
+    // Process variations based on product type
+    const variations = processVariations(simpleVariations, attributeVariations, productType);
+
     const payload = {
-      seller: sellerId,
-      mainCategory,
-      subCategory,
-      productType: productType ? String(productType).toLowerCase() : undefined,
-      productname,
-      hsnCode,
-      MOQ: toInt(MOQ),
-      purchasePrice: purchase,
-      margin: toNum(margin),
-      mrp: basePrice,
+      userId: new mongoose.Types.ObjectId(userId),
+      mainCategory, subCategory, productType, productName,
+      hsnCode, brand,
+      purchasePrice: toNum(purchasePrice),
+      includedPercentage: toNum(includedPercentage),
+      price,
       discountPercentage: toNum(discountPercentage),
       discountAmount: discountApplied,
       gstPercentage: toNum(gstPercentage),
-      gstAmount,
-      gstType,
-      finalPrice,
-      sizes: toStringArray(sizes),
-      colors: toStringArray(colors),
-      brand,
-      stock: toInt(stock),
+      gstAmount, gstType, salePrice,
+      MOQ: toInt(MOQ),
+      variations,
+      productDescription: productDescription ? String(productDescription).trim() : "",
       mainImage: toImageObj(mainImage),
       images: toImageObjArray(images),
-      description: description ? String(description).trim() : "",
-      status: "disapproved", // force disapproved initially
+      status: "disapproved",
       isActive: true,
     };
 
-    if (!payload.mainImage) return res.status(400).json({ message: 'mainImage must be a URL string or { url }' });
+    if (!payload.mainImage) return res.status(400).json({ message: 'mainImage must be a valid image object' });
 
     const saved = await Product.create(payload);
     return res.status(201).json({ message: 'Product created (pending approval)', product: saved });
@@ -136,55 +146,61 @@ exports.createProduct = async (req, res) => {
 
 /* ---------------------------------------
    UPDATE PRODUCT
-   (kept same; if you want to restrict to owner, add a seller check)
 ----------------------------------------*/
 exports.updateProduct = async (req, res) => {
   try {
+    const { id } = req.params;
     const up = { ...req.body };
 
-    ['purchasePrice','discountAmount','gstAmount','finalPrice','mrp','stock','MOQ','gstPercentage','discountPercentage']
-      .forEach(k => { if (up[k] != null) up[k] = toInt(up[k]); });
+    // Convert numeric fields
+    ['purchasePrice','includedPercentage','price','discountAmount','gstAmount','salePrice','MOQ','gstPercentage','discountPercentage']
+      .forEach(k => { if (up[k] != null) up[k] = toNum(up[k]); });
 
-    const priceInputs = ['purchasePrice','margin','discountPercentage','discountAmount','gstPercentage','gstType','mrp'];
+    // Fields that trigger price recalculation
+    const priceInputs = ['purchasePrice','includedPercentage','discountPercentage','discountAmount','gstPercentage','gstType'];
     const shouldRecalc = priceInputs.some(k => k in up);
 
     if (shouldRecalc) {
-      const current = await Product.findById(req.params.id)
-        .select('purchasePrice margin mrp gstType gstPercentage discountPercentage discountAmount');
+      const current = await Product.findById(id)
+        .select('purchasePrice includedPercentage gstType gstPercentage discountPercentage discountAmount');
       if (!current) return res.status(404).json({ message: "Product not found" });
 
-      const purchase   = up.purchasePrice != null ? toInt(up.purchasePrice) : toInt(current.purchasePrice);
-      const marginNum  = up.margin != null ? toNum(up.margin) : toNum(current.margin);
-      const basePrice  = up.mrp != null ? toInt(up.mrp) : toInt(purchase + (marginNum/100) * purchase);
-
+      const purchasePrice = up.purchasePrice != null ? toNum(up.purchasePrice) : toNum(current.purchasePrice);
+      const includedPercentage = up.includedPercentage != null ? toNum(up.includedPercentage) : toNum(current.includedPercentage);
       const discountPercentage = up.discountPercentage != null ? toNum(up.discountPercentage) : toNum(current.discountPercentage);
-      const discountAmount     = up.discountAmount != null ? toNum(up.discountAmount) : toNum(current.discountAmount);
-      const gstPercentage      = up.gstPercentage != null ? toNum(up.gstPercentage) : toNum(current.gstPercentage);
-      const gstType            = up.gstType != null ? up.gstType : current.gstType;
+      const discountAmount = up.discountAmount != null ? toNum(up.discountAmount) : toNum(current.discountAmount);
+      const gstPercentage = up.gstPercentage != null ? toNum(up.gstPercentage) : toNum(current.gstPercentage);
+      const gstType = up.gstType != null ? up.gstType : current.gstType;
 
-      const { priceAfterDiscount, gstAmount, finalPrice, discountApplied } = calc({
-        price: basePrice, discountPercentage, discountAmount, gstPercentage, gstType
+      const { price, priceAfterDiscount, gstAmount, salePrice, discountApplied } = calc({
+        purchasePrice, includedPercentage, discountPercentage, discountAmount, gstPercentage, gstType
       });
 
-      up.mrp            = basePrice;
+      up.price = price;
       up.discountAmount = discountApplied;
-      up.gstAmount      = gstAmount;
-      up.finalPrice     = finalPrice;
+      up.gstAmount = gstAmount;
+      up.salePrice = salePrice;
     }
 
+    // Handle variations update
+    if (up.simpleVariations || up.attributeVariations) {
+      const currentProduct = await Product.findById(id).select('productType');
+      if (currentProduct) {
+        up.variations = processVariations(up.simpleVariations, up.attributeVariations, currentProduct.productType);
+      }
+      delete up.simpleVariations;
+      delete up.attributeVariations;
+    }
+
+    // Handle images
     if (up.mainImage) up.mainImage = toImageObj(up.mainImage);
-    if (up.images)    up.images    = toImageObjArray(up.images);
+    if (up.images) up.images = toImageObjArray(up.images);
 
-    // (Optional) Ownership guard — uncomment to restrict updates to own products
-    // const sellerId = await resolveSellerId(req);
-    // if (!sellerId) return res.status(400).json({ message: 'Seller not found for this user' });
-    // const owned = await Product.findOne({ _id: req.params.id, seller: sellerId }).select('_id');
-    // if (!owned) return res.status(403).json({ message: 'Forbidden: cannot modify another seller’s product' });
-
-    const updated = await Product.findByIdAndUpdate(req.params.id, up, { new: true });
+    const updated = await Product.findByIdAndUpdate(id, up, { new: true });
     if (!updated) return res.status(404).json({ message: "Product not found" });
     res.json({ message: "Product updated", product: updated });
   } catch (err) {
+    console.error('❌ Update product error:', err);
     res.status(500).json({ message: "Failed to update product", error: err.message });
   }
 };
@@ -194,68 +210,21 @@ exports.updateProduct = async (req, res) => {
 ----------------------------------------*/
 exports.getAllProducts = async (req, res) => {
   try {
-    const { approved } = req.query;
+    const { approved, status, isActive } = req.query;
     const filter = {};
 
-    if (approved === "true")  filter.status = "approved";
+    if (approved === "true") filter.status = "approved";
     if (approved === "false") filter.status = "disapproved";
+    if (status) filter.status = status;
+    if (isActive !== undefined) filter.isActive = isActive === "true";
 
-    const products = await Product.find(filter).sort({ createdAt: -1 });
+    const products = await Product.find(filter)
+      .populate('userId', 'name email role')
+      .sort({ createdAt: -1 });
     res.json(products);
   } catch (err) {
+    console.error('❌ Get all products error:', err);
     res.status(500).json({ message: "Failed to fetch products", error: err.message });
-  }
-};
-
-exports.getDisapprovedProducts = async (req, res) => {
-  try {
-    const products = await Product.find({ status: "disapproved" }).sort({ createdAt: -1 });
-    res.json(products);
-  } catch (err) {
-    res.status(500).json({ message: "Failed to fetch disapproved products", error: err.message });
-  }
-};
-
-/* ---------------------------------------
-   APPROVE / CLONE PRODUCT
-----------------------------------------*/
-exports.approveProduct = async (req, res) => {
-  try {
-    const p = await Product.findById(req.params.id);
-    if (!p) return res.status(404).json({ message: "Product not found" });
-    p.status = "approved";
-    await p.save();
-    res.json({ message: "Product approved", product: p });
-  } catch (err) {
-    res.status(500).json({ message: "Approval failed", error: err.message });
-  }
-};
-
-exports.cloneProduct = async (req, res) => {
-  try {
-    const original = await Product.findById(req.params.id);
-    if (!original) return res.status(404).json({ message: "Product not found" });
-
-    const clone = new Product({
-      ...original._doc,
-      _id: undefined,
-      createdAt: undefined,
-      updatedAt: undefined,
-      status: "disapproved",
-    });
-
-    clone.purchasePrice  = toInt(clone.purchasePrice);
-    clone.mrp            = toInt(clone.mrp);
-    clone.discountAmount = toInt(clone.discountAmount);
-    clone.gstAmount      = toInt(clone.gstAmount);
-    clone.finalPrice     = toInt(clone.finalPrice);
-    clone.stock          = toInt(clone.stock);
-    clone.MOQ            = toInt(clone.MOQ);
-
-    await clone.save();
-    res.status(201).json({ message: "Product cloned (pending approval)", product: clone });
-  } catch (err) {
-    res.status(500).json({ message: "Clone failed", error: err.message });
   }
 };
 
@@ -268,15 +237,140 @@ exports.getProductById = async (req, res) => {
     if (!id) return res.status(400).json({ ok: false, message: "Product ID is required" });
 
     const product = await Product.findById(id)
-      .populate("seller", "brandName userId")
+      .populate("userId", "name email role")
       .lean();
 
     if (!product) return res.status(404).json({ ok: false, message: "Product not found" });
-    if (product.finalPrice !== undefined) product.finalPrice = Math.floor(product.finalPrice);
-
+    
     res.json({ ok: true, product });
   } catch (err) {
-    console.error("getProductById error:", err);
+    console.error("❌ Get product by ID error:", err);
     res.status(500).json({ ok: false, message: "Failed to fetch product", error: err.message });
+  }
+};
+
+/* ---------------------------------------
+   GET PRODUCTS BY USER (seller)
+----------------------------------------*/
+exports.getProductsByUser = async (req, res) => {
+  try {
+    console.log('🔍 getProductsByUser called with user:', req.user ? { id: req.user._id, role: req.user.role } : 'No user');
+    
+    const userId = resolveUserId(req);
+    if (!userId) {
+      console.log('❌ No userId found');
+      return res.status(401).json({ message: 'User not authenticated' });
+    }
+
+    console.log('✅ Finding products for userId:', userId);
+    const products = await Product.find({ userId }).sort({ createdAt: -1 });
+    
+    console.log(`📦 Found ${products.length} products`);
+    res.json(products);
+  } catch (err) {
+    console.error('❌ Get user products error:', err);
+    res.status(500).json({ message: "Failed to fetch user products", error: err.message });
+  }
+};
+
+/* ---------------------------------------
+   ✅ FIXED DELETE PRODUCT
+----------------------------------------*/
+// controllers/product.controller.js - DELETE PRODUCT (SIMPLIFIED)
+exports.deleteProduct = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = resolveUserId(req);
+    
+    if (!userId) {
+      return res.status(401).json({ message: 'User not authenticated' });
+    }
+
+    // ✅ Simple: If user can see it, user can delete it
+    // Same logic as getProductsByUser
+    const deleted = await Product.findOneAndDelete({ 
+      _id: id, 
+      userId: userId  // Only user's own products
+    });
+    
+    if (!deleted) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+    
+    res.json({ message: "Product deleted successfully" });
+  } catch (err) {
+    console.error('Delete error:', err);
+    res.status(500).json({ message: "Failed to delete product", error: err.message });
+  }
+};
+
+
+/* ---------------------------------------
+   ✅ FIXED CLONE PRODUCT
+----------------------------------------*/
+exports.cloneProduct = async (req, res) => {
+  try {
+    console.log('📋 Clone product called:', {
+      productId: req.params.id,
+      user: req.user ? { id: req.user._id, role: req.user.role } : 'No user object'
+    });
+
+    const original = await Product.findById(req.params.id);
+    if (!original) {
+      console.log('❌ Original product not found');
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    const userId = resolveUserId(req);
+    if (!userId) {
+      console.log('❌ Clone failed: No userId');
+      return res.status(401).json({ message: 'User not authenticated' });
+    }
+
+    const clone = new Product({
+      ...original._doc,
+      _id: undefined,
+      createdAt: undefined,
+      updatedAt: undefined,
+      userId: new mongoose.Types.ObjectId(userId), // Set to current user
+      status: "disapproved",
+    });
+
+    await clone.save();
+    
+    console.log('✅ Product cloned successfully:', clone._id);
+    res.status(201).json({ message: "Product cloned (pending approval)", product: clone });
+  } catch (err) {
+    console.error('❌ Clone product error:', err);
+    res.status(500).json({ message: "Clone failed", error: err.message });
+  }
+};
+
+/* ---------------------------------------
+   APPROVE / REJECT PRODUCT
+----------------------------------------*/
+exports.approveProduct = async (req, res) => {
+  try {
+    const p = await Product.findById(req.params.id);
+    if (!p) return res.status(404).json({ message: "Product not found" });
+    p.status = "approved";
+    await p.save();
+    res.json({ message: "Product approved", product: p });
+  } catch (err) {
+    console.error('❌ Approve product error:', err);
+    res.status(500).json({ message: "Approval failed", error: err.message });
+  }
+};
+
+exports.rejectProduct = async (req, res) => {
+  try {
+    const p = await Product.findById(req.params.id);
+    if (!p) return res.status(404).json({ message: "Product not found" });
+    p.status = "rejected";
+    await p.save();
+    res.json({ message: "Product rejected", product: p });
+  } catch (err) {
+    console.error('❌ Reject product error:', err);
+    res.status(500).json({ message: "Rejection failed", error: err.message });
   }
 };

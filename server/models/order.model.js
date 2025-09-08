@@ -1,123 +1,126 @@
+// models/order.model.js
 const mongoose = require("mongoose");
 
-// store all money in PAISE (integers)
-const int = v => (v == null ? v : Math.round(Number(v) || 0)); // force integers
+const int = v => (v == null ? v : Math.round(Number(v) || 0));
 
 const LineItemSchema = new mongoose.Schema({
-  product:  { type: mongoose.Schema.Types.ObjectId, ref: "Product" }, // optional for ad-hoc
-  brand:    { type: String },
+  product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+  productName: { type: String, required: true },
+  
+  // ✅ Seller & Brand info per product
+  sellerUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  brand: { type: String, required: true },
+  
   quantity: { type: Number, set: int, default: 1 },
-  price:    { type: Number, set: int },   // per-unit (PAISE, INT)
-  total:    { type: Number, set: int },   // line total (PAISE, INT)
-}, { _id: false });
-
-const DispatchInfoSchema = new mongoose.Schema({
-  courier: { type: String },
-  awb:     { type: String },
-  note:    { type: String },
-  at:      { type: Date },
-  by:      { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-}, { _id: false });
-
-const LogSchema = new mongoose.Schema({
-  at:     { type: Date, default: Date.now },
-  by:     { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-  action: { type: String }, // CONFIRMED / READY_TO_DISPATCH / DISPATCHED / DELIVERED / CANCELLED / RETURNED
-  note:   { type: String },
+  pricePerUnitPaise: { type: Number, set: int },
+  totalPaise: { type: Number, set: int }
 }, { _id: false });
 
 const orderSchema = new mongoose.Schema({
-  // Parties
-  buyerId:   { type: mongoose.Schema.Types.ObjectId, ref: "Buyer", required: true },
-  sellerId:  { type: mongoose.Schema.Types.ObjectId, ref: "Seller" }, // convenience (single-seller case)
-  staffId:   { type: mongoose.Schema.Types.ObjectId, ref: "Staff" },  // buyer’s staff
-  staffCode: { type: String },
-  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  // ✅ Core references
+  buyerUserId: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: "User", 
+    required: true,
+    index: true
+  },
+  
+  staffUserId: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: "User",
+    required: true,
+    index: true
+  },
+  
+  employeeCode: { 
+    type: String, 
+    required: true,
+    index: true 
+  },
 
-  // Address snapshot
-  pincode:     { type: String, required: true },
-  city:        { type: String },
-  state:       { type: String },
-  country:     { type: String, default: "India" },
-  fullAddress: { type: String, required: true },
+  // ✅ Order details
+  orderNumber: { 
+    type: String, 
+    unique: true,
+    index: true
+  },
 
-  // Items
+  deliveryAddress: {
+    shopName: { type: String, required: true },
+    fullAddress: { type: String, required: true },
+    city: { type: String, required: true },
+    state: { type: String, required: true },
+    postalCode: { type: String, required: true }
+  },
+
+  // ✅ Products with seller & brand info
   products: [LineItemSchema],
-  product:  { type: mongoose.Schema.Types.ObjectId, ref: "Product" }, // optional single-product shortcut
 
-  // Brand-wise summary (numbers; store INT/paise via controller)
-  brandBreakdown: [{ brand: String, amount: { type: Number, set: int } }],
+  // ✅ Brand-wise breakdown (for billing)
+  brandBreakdown: [{
+    brand: { type: String, required: true },
+    sellerUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    subtotalPaise: { type: Number, set: int },
+    taxPaise: { type: Number, set: int },
+    totalPaise: { type: Number, set: int }
+  }],
 
-  // Amounts (PAISE)
-  totalAmount:    { type: Number, set: int }, // subtotal before discount/gst
-  discountAmount: { type: Number, set: int },
-  gstAmount:      { type: Number, set: int },
-  finalAmount:    { type: Number, set: int }, // payable (== sum of related invoice grand totals)
+  // ✅ Amounts
+  subtotalPaise: { type: Number, set: int },
+  discountPaise: { type: Number, set: int, default: 0 },
+  taxPaise: { type: Number, set: int, default: 0 },
+  finalAmountPaise: { type: Number, set: int },
 
-  // Payments (order-level rollups; invoices are the source of truth)
-  paidAmount:       { type: Number, set: int, default: 0 }, // legacy support (PAISE)
-  amountPaidPaise:  { type: Number, set: int, default: 0 }, // use this going forward
+  // ✅ Payment & Status
+  paidAmountPaise: { type: Number, set: int, default: 0 },
   paymentStatus: {
     type: String,
-    enum: ["unpaid", "partially_paid", "paid", "refunded"],
+    enum: ["unpaid", "partially_paid", "paid"],
     default: "unpaid",
-    index: true,
+    index: true
   },
-  fullyPaidAt: { type: Date },
-
-  // Status pipeline
   status: {
     type: String,
-    enum: ["confirmed","ready-to-dispatch","dispatched","delivered","cancelled","returned"],
+    enum: ["confirmed", "processing", "shipped", "delivered", "cancelled"],
     default: "confirmed",
-    index: true,
+    index: true
   },
+  notes: { type: String }
+}, { 
+  timestamps: true,
+  index: [
+    { buyerUserId: 1, createdAt: -1 },
+    { staffUserId: 1, createdAt: -1 },
+    { "products.sellerUserId": 1, createdAt: -1 },
+    { "brandBreakdown.sellerUserId": 1, createdAt: -1 }
+  ]
+});
 
-  // Dispatch & audit
-  dispatchInfo: DispatchInfoSchema,
-  logs:         [LogSchema],
-
-  // Invoices linkage (multi-seller/brand invoices)
-  invoiceIds:        [{ type: mongoose.Schema.Types.ObjectId, ref: "Invoice" }],
-  orderNo:           { type: String },
-  invoiceNo:         { type: String },        // (optional legacy single-invoice)
-  invoiceUrl:        { type: String },
-  sellerInvoiceUrl:  { type: String },
-
-  // Operational controls
-  riskHold: { type: Boolean, default: false }, // block dispatch until paid/high-value cleared
-
-  // Returns
-  isReturnRequested: { type: Boolean, default: false },
-  returnReason:      { type: String },
-}, { timestamps: true });
-
-// Helpful indexes
-orderSchema.index({ buyerId: 1, createdAt: -1 });
-orderSchema.index({ staffId: 1, createdAt: -1 });
-orderSchema.index({ staffCode: 1, createdAt: -1 });
-orderSchema.index({ sellerId: 1, createdAt: -1 });
-orderSchema.index({ status: 1, createdAt: -1 });
-// For seller-by-product queries
-orderSchema.index({ "products.product": 1, status: 1, createdAt: -1 });
-
-// ---------- helpers (optional, but nice) ----------
-
-// Keep paymentStatus in sync easily from services/controllers
-orderSchema.methods.setPaymentRollup = function ({ paidPaise }) {
-  this.amountPaidPaise = int(paidPaise);
-  this.paidAmount = int(paidPaise); // maintain legacy field
-  const due = (this.finalAmount || 0) - (this.amountPaidPaise || 0);
-  if (this.amountPaidPaise <= 0) {
-    this.paymentStatus = "unpaid";
-    this.fullyPaidAt = undefined;
-  } else if (due > 0) {
-    this.paymentStatus = "partially_paid";
-    this.fullyPaidAt = undefined;
-  } else {
-    this.paymentStatus = "paid";
-    if (!this.fullyPaidAt) this.fullyPaidAt = new Date();
-  }
+// ✅ Method to calculate brand-wise breakdown
+orderSchema.methods.calculateBrandBreakdown = function() {
+  const brandMap = new Map();
+  
+  // Group products by brand and seller
+  this.products.forEach(item => {
+    const key = `${item.brand}-${item.sellerUserId}`;
+    
+    if (!brandMap.has(key)) {
+      brandMap.set(key, {
+        brand: item.brand,
+        sellerUserId: item.sellerUserId,
+        subtotalPaise: 0
+      });
+    }
+  
+    brandMap.get(key).subtotalPaise += item.totalPaise;
+  });
+  // Convert to breakdown array with tax calculation
+  this.brandBreakdown = Array.from(brandMap.values()).map(item => ({
+    ...item,
+    taxPaise: Math.round(item.subtotalPaise * 0.18), // 18% GST
+    totalPaise: Math.round(item.subtotalPaise * 1.18)
+  }));
+  return this;
 };
 
 module.exports = mongoose.model("Order", orderSchema);
