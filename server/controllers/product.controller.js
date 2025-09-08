@@ -219,7 +219,7 @@ exports.getAllProducts = async (req, res) => {
     if (isActive !== undefined) filter.isActive = isActive === "true";
 
     const products = await Product.find(filter)
-      .populate('userId', 'name email role')
+      .populate('userId', 'name email role phone businessName address')
       .sort({ createdAt: -1 });
     res.json(products);
   } catch (err) {
@@ -237,7 +237,7 @@ exports.getProductById = async (req, res) => {
     if (!id) return res.status(400).json({ ok: false, message: "Product ID is required" });
 
     const product = await Product.findById(id)
-      .populate("userId", "name email role")
+      .populate("userId", "name email role phone businessName address") 
       .lean();
 
     if (!product) return res.status(404).json({ ok: false, message: "Product not found" });

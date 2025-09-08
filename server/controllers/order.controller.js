@@ -270,6 +270,66 @@ exports.getOrders = async (req, res) => {
 };
 
 // ✅ GET ORDER BY ID
+// exports.getOrderById = async (req, res) => {
+//   try {
+//     const { orderId } = req.params;
+//     const userId = req.user._id;
+//     const userRole = req.user.role;
+
+//     const order = await Order.findById(orderId)
+//       .populate('buyerUserId', 'name phone email')
+//       .populate('staffUserId', 'name phone email')
+//       .populate({
+//         path: 'products.product',
+//         select: 'productName brand mainImage'
+//       });
+
+//     if (!order) {
+//       return res.status(404).json({
+//         ok: false,
+//         message: "Order not found"
+//       });
+//     }
+
+//     // Authorization check
+//     let hasAccess = false;
+    
+//     if (userRole === "admin") {
+//       hasAccess = true;
+//     } else if (userRole === "buyer") {
+//       hasAccess = order.buyerUserId._id.toString() === userId.toString();
+//     } else if (userRole === "staff") {
+//       hasAccess = order.staffUserId._id.toString() === userId.toString();
+//     } else if (userRole === "seller") {
+//       hasAccess = order.products.some(product => 
+//         product.sellerUserId?.toString() === userId.toString()
+//       );
+//     }
+
+//     if (!hasAccess) {
+//       return res.status(403).json({
+//         ok: false,
+//         message: "Access denied - this order doesn't belong to you"
+//       });
+//     }
+
+//     res.json({
+//       ok: true,
+//       data: order
+//     });
+
+//   } catch (error) {
+//     console.error("Get order by ID error:", error);
+//     res.status(500).json({
+//       ok: false,
+//       message: "Failed to fetch order",
+//       error: error.message
+//     });
+//   }
+// };
+// controllers/order.controller.js में getOrderById function को update करें
+
+// ✅ GET ORDER BY ID
 exports.getOrderById = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -291,7 +351,7 @@ exports.getOrderById = async (req, res) => {
       });
     }
 
-    // Authorization check
+    // Authorization check (same as before)
     let hasAccess = false;
     
     if (userRole === "admin") {
@@ -313,9 +373,28 @@ exports.getOrderById = async (req, res) => {
       });
     }
 
+    // ✅ Format response for frontend (added this part)
+    const formattedOrder = {
+      ...order.toObject(),
+      // Convert paise to rupees for display
+      finalAmount: order.finalAmountPaise ? (order.finalAmountPaise / 100) : 0,
+      subtotal: order.subtotalPaise ? (order.subtotalPaise / 100) : 0,
+      tax: order.taxPaise ? (order.taxPaise / 100) : 0,
+      
+      // Ensure required fields for tracking
+      items: order.products || [],
+      products: order.products || [],
+      address: order.deliveryAddress || null,
+      deliveryAddress: order.deliveryAddress || null,
+      statusHistory: order.statusLogs || [],
+      tracking: order.statusLogs || [],
+      paymentType: order.paymentType || 'COD',
+      paymentMethod: order.paymentType || 'COD'
+    };
+
     res.json({
       ok: true,
-      data: order
+      data: formattedOrder
     });
 
   } catch (error) {
@@ -327,6 +406,7 @@ exports.getOrderById = async (req, res) => {
     });
   }
 };
+
 
 // ============================
 // 3. SELLER FUNCTIONS
@@ -1011,15 +1091,16 @@ exports.bulkDispatchOrders = async (req, res) => {
   }
 };
 
-// ============================
-// 7. UTILITY FUNCTIONS
-// ============================
 
-// ✅ GET BRAND-WISE BILL
+// ✅ ENHANCED BRAND-WISE BILL WITH SELLER ADDRESS
+// controllers/order.controller.js में getBrandWiseBill function को replace करें
+
 exports.getBrandWiseBill = async (req, res) => {
   try {
     const { orderId } = req.params;
     const { brand, sellerUserId } = req.query;
+
+    console.log("🔍 Fetching bill for:", { orderId, brand, sellerUserId });
 
     if (!brand || !sellerUserId) {
       return res.status(400).json({
@@ -1030,8 +1111,7 @@ exports.getBrandWiseBill = async (req, res) => {
 
     const order = await Order.findById(orderId)
       .populate('buyerUserId', 'name phone email')
-      .populate('products.sellerUserId', 'name email businessName')
-      .populate('brandBreakdown.sellerUserId', 'name email businessName');
+      .populate('staffUserId', 'name phone email');
 
     if (!order) {
       return res.status(404).json({
@@ -1040,25 +1120,59 @@ exports.getBrandWiseBill = async (req, res) => {
       });
     }
 
-    // Filter for specific brand/seller
+    // Filter products
     const brandProducts = order.products.filter(product => 
       product.brand === brand && 
-      product.sellerUserId._id.toString() === sellerUserId
+      product.sellerUserId.toString() === sellerUserId
     );
 
     const brandBill = order.brandBreakdown.find(breakdown =>
       breakdown.brand === brand && 
-      breakdown.sellerUserId._id.toString() === sellerUserId
+      breakdown.sellerUserId.toString() === sellerUserId
     );
 
     if (!brandBill || brandProducts.length === 0) {
       return res.status(404).json({
         ok: false,
-        message: "Brand bill not found for this combination"
+        message: "Brand bill not found"
       });
     }
 
-    // Generate bill data
+    // ✅ DIRECT SELLER FETCH - NO COMPLICATIONS
+    console.log("📋 Fetching seller with ID:", sellerUserId);
+    
+    const User = require('../models/user.model');
+    const Seller = require('../models/seller.model');
+    
+    const [userInfo, sellerProfile] = await Promise.all([
+      User.findById(sellerUserId).lean(),
+      Seller.findOne({ userId: sellerUserId }).lean()
+    ]);
+
+    console.log("👤 User Info:", userInfo);
+    console.log("🏪 Seller Profile:", sellerProfile);
+
+    // ✅ BUILD SELLER OBJECT
+    const seller = {
+      name: userInfo?.name || "Unknown Seller",
+      email: userInfo?.email || "N/A",
+      phone: userInfo?.phone || "N/A",
+      businessName: sellerProfile?.brandName || userInfo?.businessName || brand,
+      address: sellerProfile?.fullAddress ? {
+        street: `${sellerProfile.fullAddress.line1}${sellerProfile.fullAddress.line2 ? ', ' + sellerProfile.fullAddress.line2 : ''}`,
+        city: sellerProfile.fullAddress.city,
+        state: sellerProfile.fullAddress.state,
+        postalCode: sellerProfile.fullAddress.postalCode
+      } : {
+        street: "Address not provided",
+        city: "Unknown",
+        state: "Unknown",
+        postalCode: "000000"
+      }
+    };
+
+    console.log("✅ Final Seller Object:", seller);
+
     const billData = {
       orderNumber: order.orderNumber,
       billNumber: `BILL-${order.orderNumber}-${brand.toUpperCase()}`,
@@ -1068,18 +1182,24 @@ exports.getBrandWiseBill = async (req, res) => {
         email: order.buyerUserId.email,
         address: order.deliveryAddress
       },
-      seller: brandBill.sellerUserId,
+      seller: seller,
+      staff: order.staffUserId ? {
+        name: order.staffUserId.name,
+        phone: order.staffUserId.phone,
+        email: order.staffUserId.email,
+        employeeCode: order.employeeCode
+      } : null,
       brand: brand,
       products: brandProducts.map(product => ({
         name: product.productName,
         quantity: product.quantity,
-        pricePerUnit: Math.round(product.pricePerUnitPaise / 100),
-        total: Math.round(product.totalPaise / 100)
+        pricePerUnit: (product.pricePerUnitPaise / 100).toFixed(2),
+        total: (product.totalPaise / 100).toFixed(2)
       })),
       amounts: {
-        subtotal: Math.round(brandBill.subtotalPaise / 100),
-        tax: Math.round(brandBill.taxPaise / 100),
-        total: Math.round(brandBill.totalPaise / 100)
+        subtotal: (brandBill.subtotalPaise / 100).toFixed(2),
+        tax: (brandBill.taxPaise / 100).toFixed(2),
+        total: (brandBill.totalPaise / 100).toFixed(2)
       },
       dates: {
         orderDate: order.createdAt,
@@ -1094,7 +1214,7 @@ exports.getBrandWiseBill = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("Generate brand bill error:", error);
+    console.error("❌ Generate brand bill error:", error);
     res.status(500).json({
       ok: false,
       message: "Failed to generate brand bill",
@@ -1102,6 +1222,8 @@ exports.getBrandWiseBill = async (req, res) => {
     });
   }
 };
+
+
 
 // ✅ CANCEL ORDER
 exports.cancelOrder = async (req, res) => {
