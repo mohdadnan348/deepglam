@@ -22,4 +22,11 @@ router.get('/profit', masterController.getProfits);
 router.post('/banner', masterController.createBanner);
 router.get('/banner', masterController.getBanners);
 
+// ➕ Add Percentage
+router.post('/percentage', masterController.addPercentage);
+router.get('/percentage', masterController.getPercentages);
+
+
+
+
 module.exports = router;
