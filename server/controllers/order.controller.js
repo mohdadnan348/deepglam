@@ -1130,8 +1130,7 @@ exports.bulkDispatchOrders = async (req, res) => {
   }
 };
 
-
-// ✅ COMPLETELY FIXED getBrandWiseBill function
+// ✅ COMPLETELY REWRITTEN BRAND-WISE BILL WITH ROBUST ERROR HANDLING
 exports.getBrandWiseBill = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -1182,7 +1181,7 @@ exports.getBrandWiseBill = async (req, res) => {
         path: 'products.sellerUserId',
         select: 'name phone email businessName'
       })
-      .lean();
+      .lean(); // Use lean for better performance
 
     if (!order) {
       console.log("❌ Order not found");
@@ -1193,12 +1192,14 @@ exports.getBrandWiseBill = async (req, res) => {
     }
 
     console.log("✅ Order found:", order.orderNumber);
+    console.log("📦 Products count:", order.products?.length || 0);
+    console.log("🏢 Brand breakdown count:", order.brandBreakdown?.length || 0);
 
     // STEP 2: Find brand products with robust matching
     console.log("🔍 Filtering products for brand:", brand, "seller:", sellerUserId);
 
     const brandProducts = order.products.filter(product => {
-      // Handle different sellerUserId formats
+      // Handle different sellerUserId formats in products
       let productSellerId;
       if (typeof product.sellerUserId === 'object' && product.sellerUserId !== null) {
         productSellerId = product.sellerUserId._id;
@@ -1206,6 +1207,7 @@ exports.getBrandWiseBill = async (req, res) => {
         productSellerId = product.sellerUserId;
       }
 
+      // Normalize for comparison
       const normalizedProductSellerId = productSellerId ? productSellerId.toString() : '';
       const normalizedSearchSellerId = sellerUserId.toString();
       const brandMatches = product.brand === brand;
@@ -1219,15 +1221,10 @@ exports.getBrandWiseBill = async (req, res) => {
     console.log("✅ Found brand products:", brandProducts.length);
 
     if (brandProducts.length === 0) {
-      // Debug info
+      // Debug info for troubleshooting
       const availableOptions = order.products.map(p => {
         const sellerId = typeof p.sellerUserId === 'object' ? p.sellerUserId._id : p.sellerUserId;
-        return { 
-          productName: p.productName,
-          brand: p.brand, 
-          sellerId: sellerId?.toString(),
-          sellerName: p.sellerUserId?.name || 'Unknown'
-        };
+        return { brand: p.brand, sellerId: sellerId?.toString() };
       });
       
       console.log("❌ No products found. Available options:", availableOptions);
@@ -1237,16 +1234,15 @@ exports.getBrandWiseBill = async (req, res) => {
         message: `No products found for brand "${brand}" and seller "${sellerUserId}"`,
         debug: {
           availableOptions,
-          searchCriteria: { brand, sellerUserId },
-          orderNumber: order.orderNumber
+          searchCriteria: { brand, sellerUserId }
         }
       });
     }
 
-    // STEP 3: Find or calculate brand breakdown
+    // STEP 3: Find brand breakdown with robust matching
     console.log("🔍 Looking for brand breakdown...");
 
-    let brandBill = order.brandBreakdown?.find(breakdown => {
+    const brandBill = order.brandBreakdown?.find(breakdown => {
       let breakdownSellerId;
       if (typeof breakdown.sellerUserId === 'object' && breakdown.sellerUserId !== null) {
         breakdownSellerId = breakdown.sellerUserId._id || breakdown.sellerUserId;
@@ -1259,33 +1255,36 @@ exports.getBrandWiseBill = async (req, res) => {
       const brandMatches = breakdown.brand === brand;
       const sellerMatches = normalizedBreakdownSellerId === normalizedSearchSellerId;
 
+      console.log(`  Breakdown: Brand: ${breakdown.brand}(${brandMatches}), Seller: ${normalizedBreakdownSellerId}(${sellerMatches})`);
+
       return brandMatches && sellerMatches;
     });
 
-    // If no brand breakdown found, calculate it manually
     if (!brandBill) {
-      console.log("⚠️ Brand breakdown not found in order, calculating manually...");
+      console.log("❌ Brand breakdown not found");
+      const availableBreakdowns = order.brandBreakdown?.map(b => ({
+        brand: b.brand,
+        sellerId: typeof b.sellerUserId === 'object' ? b.sellerUserId._id : b.sellerUserId
+      })) || [];
       
-      const subtotalPaise = brandProducts.reduce((sum, p) => sum + (p.totalPaise || 0), 0);
-      const taxPaise = Math.round(subtotalPaise * 0.18); // 18% tax
-      const totalPaise = subtotalPaise + taxPaise;
-
-      brandBill = {
-        brand: brand,
-        sellerUserId: sellerUserId,
-        subtotalPaise,
-        taxPaise,
-        totalPaise
-      };
+      return res.status(404).json({
+        ok: false,
+        message: `Brand breakdown not found for brand "${brand}" and seller "${sellerUserId}"`,
+        debug: {
+          availableBreakdowns,
+          searchCriteria: { brand, sellerUserId }
+        }
+      });
     }
 
-    console.log("✅ Brand bill data ready");
+    console.log("✅ Found brand breakdown");
 
     // STEP 4: Get comprehensive seller information
     console.log("👤 Fetching seller information for ID:", sellerUserId);
 
     const Seller = require('../models/seller.model');
 
+    // Parallel fetch for better performance
     const [userInfo, sellerProfile] = await Promise.all([
       User.findById(sellerUserId).select('name email phone businessName').lean(),
       Seller.findOne({ userId: sellerUserId }).select('brandName fullAddress gstNumber').lean()
@@ -1305,13 +1304,12 @@ exports.getBrandWiseBill = async (req, res) => {
 
     // Add address information
     if (sellerProfile?.fullAddress) {
-      const addr = sellerProfile.fullAddress;
       seller.address = {
-        street: `${addr.line1 || ''}${addr.line2 ? ', ' + addr.line2 : ''}`.trim() || "Address not provided",
-        city: addr.city || "Unknown",
-        state: addr.state || "Unknown", 
-        postalCode: addr.postalCode || "000000",
-        country: addr.country || "India"
+        street: `${sellerProfile.fullAddress.line1 || ''}${sellerProfile.fullAddress.line2 ? ', ' + sellerProfile.fullAddress.line2 : ''}`.trim() || "Address not provided",
+        city: sellerProfile.fullAddress.city || "Unknown",
+        state: sellerProfile.fullAddress.state || "Unknown", 
+        postalCode: sellerProfile.fullAddress.postalCode || "000000",
+        country: sellerProfile.fullAddress.country || "India"
       };
     } else {
       seller.address = {
@@ -1322,6 +1320,12 @@ exports.getBrandWiseBill = async (req, res) => {
         country: "India"
       };
     }
+
+    console.log("✅ Built seller object:", {
+      name: seller.name,
+      businessName: seller.businessName,
+      hasAddress: !!sellerProfile?.fullAddress
+    });
 
     // STEP 6: Build buyer information
     const buyer = {
@@ -1338,7 +1342,7 @@ exports.getBrandWiseBill = async (req, res) => {
       }
     };
 
-    // STEP 7: Build staff information
+    // STEP 7: Build staff information (if available)
     const staff = order.staffUserId ? {
       name: order.staffUserId.name || "Unknown Staff",
       phone: order.staffUserId.phone || "N/A",
@@ -1384,6 +1388,12 @@ exports.getBrandWiseBill = async (req, res) => {
     };
 
     console.log("✅ Bill generated successfully");
+    console.log("📊 Bill summary:", {
+      orderNumber: billData.orderNumber,
+      brand: billData.brand,
+      productsCount: billData.products.length,
+      total: billData.amounts.total
+    });
 
     res.json({
       ok: true,
@@ -1402,7 +1412,7 @@ exports.getBrandWiseBill = async (req, res) => {
   }
 };
 
-// ✅ ENHANCED getOrderById with better seller data population
+// ✅ ENHANCED getOrderById with seller address population
 exports.getOrderById = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -1418,7 +1428,7 @@ exports.getOrderById = async (req, res) => {
       });
     }
 
-    // Step 1: Get order with comprehensive populations
+    // Step 1: Get order with basic populations
     const order = await Order.findById(orderId)
       .populate('buyerUserId', 'name phone email businessName')
       .populate('staffUserId', 'name phone email')
@@ -1462,87 +1472,81 @@ exports.getOrderById = async (req, res) => {
       });
     }
 
-    console.log("✅ Authorization passed, enhancing data...");
+    console.log("✅ Authorization passed, enhancing seller data...");
 
-    // Step 3: Enhance brandBreakdown with seller information
-    if (order.brandBreakdown && order.brandBreakdown.length > 0) {
-      // Get unique seller IDs from products (not from brandBreakdown)
-      const sellerIds = [...new Set(order.products
-        .map(p => p.sellerUserId?._id || p.sellerUserId)
-        .filter(id => id)
-        .map(id => id.toString())
-      )];
+    // Step 3: Get unique seller IDs for address population
+    const sellerIds = [...new Set(order.products
+      .map(p => p.sellerUserId?._id)
+      .filter(id => id)
+    )];
 
-      console.log("🔍 Seller IDs found:", sellerIds);
+    console.log("🔍 Seller IDs found:", sellerIds.length);
 
-      if (sellerIds.length > 0) {
-        const Seller = require('../models/seller.model');
-        
-        // Fetch additional seller profiles
-        const [sellerProfiles, sellerUsers] = await Promise.all([
-          Seller.find({ userId: { $in: sellerIds } })
-            .select('userId brandName fullAddress gstNumber')
-            .lean(),
-          User.find({ _id: { $in: sellerIds } })
-            .select('name phone email businessName')
-            .lean()
-        ]);
+    // Step 4: Fetch seller profiles if we have seller IDs
+    if (sellerIds.length > 0) {
+      const Seller = require('../models/seller.model');
+      
+      const sellerProfiles = await Seller.find({ 
+        userId: { $in: sellerIds } 
+      }).select('userId brandName fullAddress gstNumber').lean();
+      
+      console.log("🏪 Seller profiles found:", sellerProfiles.length);
 
-        // Create enhanced seller maps
-        const sellerProfileMap = new Map();
-        const sellerUserMap = new Map();
-        
-        sellerProfiles.forEach(seller => {
-          sellerProfileMap.set(seller.userId.toString(), seller);
-        });
-        
-        sellerUsers.forEach(user => {
-          sellerUserMap.set(user._id.toString(), user);
-        });
+      // Create seller map for quick lookup
+      const sellerMap = new Map();
+      sellerProfiles.forEach(seller => {
+        sellerMap.set(seller.userId.toString(), seller);
+      });
 
-        // Enhance brandBreakdown with complete seller info
-        order.brandBreakdown = order.brandBreakdown.map(breakdown => {
-          // Find the correct seller ID for this brand
-          const brandProduct = order.products.find(p => 
-            p.brand === breakdown.brand && 
-            (p.sellerUserId?._id?.toString() || p.sellerUserId?.toString())
-          );
+      // Step 5: Enhance each product with seller address data
+      order.products.forEach((product, index) => {
+        if (product.sellerUserId?._id) {
+          const sellerId = product.sellerUserId._id.toString();
+          const sellerData = sellerMap.get(sellerId);
           
-          if (brandProduct) {
-            const sellerId = (brandProduct.sellerUserId?._id || brandProduct.sellerUserId).toString();
-            const sellerProfile = sellerProfileMap.get(sellerId);
-            const sellerUser = sellerUserMap.get(sellerId);
+          if (sellerData) {
+            // Add enhanced seller info
+            product.sellerUserId.brandName = sellerData.brandName || product.sellerUserId.businessName || "Unknown Brand";
+            product.sellerUserId.gstNumber = sellerData.gstNumber;
             
-            // Enhanced breakdown with seller info
-            return {
-              ...breakdown.toObject ? breakdown.toObject() : breakdown,
-              sellerUserId: sellerId, // Ensure this is a string for consistent comparison
-              sellerInfo: {
-                _id: sellerId,
-                name: sellerUser?.name || brandProduct.sellerUserId?.name || "Unknown Seller",
-                phone: sellerUser?.phone || brandProduct.sellerUserId?.phone || "N/A",
-                email: sellerUser?.email || brandProduct.sellerUserId?.email || "N/A",
-                businessName: sellerProfile?.brandName || sellerUser?.businessName || breakdown.brand,
-                gstNumber: sellerProfile?.gstNumber || "N/A",
-                address: sellerProfile?.fullAddress ? {
-                  street: `${sellerProfile.fullAddress.line1 || ''}${sellerProfile.fullAddress.line2 ? ', ' + sellerProfile.fullAddress.line2 : ''}`.trim(),
-                  city: sellerProfile.fullAddress.city || "Unknown",
-                  state: sellerProfile.fullAddress.state || "Unknown",
-                  postalCode: sellerProfile.fullAddress.postalCode || "000000",
-                  country: sellerProfile.fullAddress.country || "India"
-                } : null
-              }
+            // Add formatted address
+            if (sellerData.fullAddress) {
+              product.sellerUserId.fullAddress = sellerData.fullAddress;
+              product.sellerUserId.address = {
+                street: `${sellerData.fullAddress.line1 || ''}${sellerData.fullAddress.line2 ? ', ' + sellerData.fullAddress.line2 : ''}`.trim(),
+                city: sellerData.fullAddress.city || "Unknown",
+                state: sellerData.fullAddress.state || "Unknown",
+                postalCode: sellerData.fullAddress.postalCode || "000000",
+                country: sellerData.fullAddress.country || "India"
+              };
+              console.log("✅ Address added for seller:", sellerId.slice(-6));
+            } else {
+              // Fallback address
+              product.sellerUserId.address = {
+                street: "Address not provided",
+                city: "Unknown", 
+                state: "Unknown",
+                postalCode: "000000",
+                country: "India"
+              };
+              console.log("⚠️ No address found for seller:", sellerId.slice(-6));
+            }
+          } else {
+            console.log("❌ No seller profile found for:", sellerId.slice(-6));
+            // Add default address
+            product.sellerUserId.address = {
+              street: "Address not provided", 
+              city: "Unknown",
+              state: "Unknown",
+              postalCode: "000000",
+              country: "India"
             };
           }
-          
-          return breakdown;
-        });
-
-        console.log("✅ Enhanced brandBreakdown with seller info");
-      }
+        }
+      });
     }
 
-    // Step 4: Format response with all required fields
+    // Step 6: Format response with all required fields
     const formattedOrder = {
       ...order.toObject(),
       // Convert paise to rupees for display
@@ -1579,73 +1583,6 @@ exports.getOrderById = async (req, res) => {
     res.status(500).json({
       ok: false,
       message: "Failed to fetch order details",
-      error: error.message
-    });
-  }
-};
-// ✅ CANCEL ORDER
-exports.cancelOrder = async (req, res) => {
-  try {
-    const { orderId } = req.params;
-    const { reason = "" } = req.body;
-    const userId = req.user._id;
-    const userRole = req.user.role;
-
-    const order = await Order.findById(orderId);
-    if (!order) {
-      return res.status(404).json({
-        ok: false,
-        message: "Order not found"
-      });
-    }
-
-    // Authorization checks
-    if (userRole === "buyer" && order.buyerUserId.toString() !== userId.toString()) {
-      return res.status(403).json({
-        ok: false,
-        message: "Access denied"
-      });
-    }
-
-    if (userRole === "staff" && order.staffUserId.toString() !== userId.toString()) {
-      return res.status(403).json({
-        ok: false,
-        message: "Access denied - not your buyer's order"
-      });
-    }
-
-    // Check if order can be cancelled
-    if (["shipped", "delivered", "cancelled"].includes(order.status)) {
-      return res.status(400).json({
-        ok: false,
-        message: `Cannot cancel order with status: ${order.status}`
-      });
-    }
-
-    // Cancel order
-    order.status = "cancelled";
-    if (!order.statusLogs) order.statusLogs = [];
-
-    order.statusLogs.push({
-      timestamp: new Date(),
-      actionBy: userId,
-      action: "CANCELLED",
-      note: reason || "Order cancelled by user"
-    });
-
-    await order.save();
-
-    res.json({
-      ok: true,
-      message: "Order cancelled successfully",
-      data: order
-    });
-
-  } catch (error) {
-    console.error("Cancel order error:", error);
-    res.status(500).json({
-      ok: false,
-      message: "Failed to cancel order",
       error: error.message
     });
   }

@@ -10,7 +10,6 @@ router.post("/login", authCtrl.login);
 // router.post("/otp-login", authCtrl.otpLogin);
 // router.post("/reset-password", authCtrl.resetPassword);
 
-
 // ✅ GET /api/users/admin
 router.get("/alluser", getAllUsersAdmin);
 

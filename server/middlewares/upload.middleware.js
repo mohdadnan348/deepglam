@@ -1,145 +1,79 @@
-const mongoose = require('mongoose');
-const Product = require('../models/product.model');
-const User = require('../models/user.model'); 
+const multer = require("multer");
+const path = require("path");
+const fs = require("fs");
+const { Readable } = require("stream");
+const cloudinary = require("cloudinary").v2;
 
-/* ---------- helpers ---------- */
-const toNum = v => (Number.isFinite(Number(v)) ? Number(v) : 0);
-const toInt = v => Math.round(toNum(v));
-
-// Updated price calculator for new model
-const calc = ({ purchasePrice, includedPercentage=0, discountPercentage=0, discountAmount=0, gstPercentage=0, gstType='exclusive' }) => {
-  const _purchasePrice = toNum(purchasePrice);
-  const _includedPct = toNum(includedPercentage);
-  
-  // Calculate price based on purchasePrice + includedPercentage
-  const basePrice = _purchasePrice + (_purchasePrice * _includedPct / 100);
-  
-  // Apply discount
-  const discPctAmt = basePrice * (toNum(discountPercentage)/100);
-  const theDisc = Math.max(toNum(discountAmount), discPctAmt);
-  const afterDisc = Math.max(basePrice - theDisc, 0);
-
-  // Calculate GST
-  const inclusive = String(gstType).toLowerCase() === 'inclusive';
-  const gstAmtFloat = inclusive
-    ? (afterDisc - (afterDisc / (1 + toNum(gstPercentage)/100)))
-    : (afterDisc * toNum(gstPercentage)/100);
-
-  const salePrice = inclusive ? afterDisc : (afterDisc + gstAmtFloat);
-
-  return { 
-    price: Math.round(basePrice * 100) / 100,
-    priceAfterDiscount: Math.round(afterDisc * 100) / 100, 
-    gstAmount: Math.round(gstAmtFloat * 100) / 100, 
-    salePrice: Math.round(salePrice * 100) / 100,
-    discountApplied: Math.round(theDisc * 100) / 100 
-  };
-};
-
-// images
-const toImageObj = (v) => {
-  if (!v) return null;
-  if (typeof v === 'string') return { url: v, public_id: '' };
-  if (v && typeof v === 'object') return { 
-    url: v.url || v.uri || '', 
-    public_id: v.public_id || v.fileName || '' 
-  };
-  return null;
-};
-
-const toImageObjArray = (arr) => (Array.isArray(arr) ? arr.map(toImageObj).filter(Boolean) : []);
-
-// Variations handler
-const processVariations = (simpleVariations, attributeVariations, productType) => {
-  if (productType === 'Simple') {
-    return Array.isArray(simpleVariations) 
-      ? simpleVariations.filter(v => v.size && v.color).map(v => ({
-          size: String(v.size).trim(),
-          color: String(v.color).trim()
-        }))
-      : [];
-  } else if (productType === 'Attribute') {
-    return Array.isArray(attributeVariations)
-      ? attributeVariations.filter(v => v.size && v.color).map(v => ({
-          size: String(v.size).trim(),
-          color: String(v.color).trim(),
-          pieces: v.pieces ? String(v.pieces).trim() : ''
-        }))
-      : [];
-  }
-  return [];
-};
-
-/** ✅ FIXED - Resolve userId from authenticated user */
-function resolveUserId(req) {
-  console.log('🔍 Resolving userId from:', {
-    user: req.user ? { id: req.user._id, role: req.user.role } : 'No user object'
-  });
-  return req.user?._id || req.user?.id || null;
+/* ---------------- Ensure uploads dir ---------------- */
+const uploadDir = path.join(__dirname, "../uploads");
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir);
 }
 
-/* ---------------------------------------
-   CREATE PRODUCT
-----------------------------------------*/
-exports.createProduct = async (req, res) => {
-  try {
-    const {
-      mainCategory, subCategory, productType, productName,
-      hsnCode, MOQ, purchasePrice, 
-      includedPercentage = 0,
-      discountPercentage = 0, discountAmount = 0, 
-      gstPercentage = 0, gstType = 'exclusive',
-      simpleVariations, attributeVariations,
-      brand, mainImage, images = [], productDescription,
-    } = req.body;
+/* ---------------- Multer for images ---------------- */
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+    const uniqueName = `${Date.now()}-${file.originalname}`;
+    cb(null, uniqueName);
+  },
+});
 
-    // Validation
-    if (!productName) return res.status(400).json({ message: 'productName is required' });
-    if (!mainCategory) return res.status(400).json({ message: 'mainCategory is required' });
-    if (!subCategory) return res.status(400).json({ message: 'subCategory is required' });
-    if (purchasePrice === undefined || purchasePrice === null)
-      return res.status(400).json({ message: 'purchasePrice is required' });
-    if (!productType) return res.status(400).json({ message: 'productType is required' });
-    if (!mainImage) return res.status(400).json({ message: 'mainImage is required' });
+const fileFilter = (req, file, cb) => {
+  const allowedTypes = ["image/jpeg", "image/jpg", "image/png"];
+  if (allowedTypes.includes(file.mimetype)) cb(null, true);
+  else cb(new Error("Only jpg, jpeg, png files allowed"));
+};
 
-    // Get userId from authenticated user
-    const userId = resolveUserId(req);
-    if (!userId) return res.status(401).json({ message: 'User not authenticated' });
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB
+});
 
-    // Price calculations using new model
-    const { price, priceAfterDiscount, gstAmount, salePrice, discountApplied } = calc({
-      purchasePrice, includedPercentage, discountPercentage, discountAmount, gstPercentage, gstType
+/* ---------------- Cloudinary Config (for invoices/raw) ---------------- */
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+/* ---------------- Buffer → Cloudinary ---------------- */
+function uploadRawBufferToCloudinary(
+  buffer,
+  { publicId, folder = "invoices", overwrite = true }
+) {
+  return new Promise((resolve, reject) => {
+    const opts = {
+      resource_type: "raw", // raw = PDF, docs, etc
+      overwrite,
+      folder,
+    };
+    if (publicId) opts.public_id = publicId;
+
+    const stream = cloudinary.uploader.upload_stream(opts, (err, result) => {
+      if (err) return reject(err);
+      resolve(result); // { secure_url, public_id, ... }
     });
 
-    // Process variations based on product type
-    const variations = processVariations(simpleVariations, attributeVariations, productType);
+    Readable.from(buffer).pipe(stream);
+  });
+}
 
-    const payload = {
-      userId: new mongoose.Types.ObjectId(userId),
-      mainCategory, subCategory, productType, productName,
-      hsnCode, brand,
-      purchasePrice: toNum(purchasePrice),
-      includedPercentage: toNum(includedPercentage),
-      price,
-      discountPercentage: toNum(discountPercentage),
-      discountAmount: discountApplied,
-      gstPercentage: toNum(gstPercentage),
-      gstAmount, gstType, salePrice,
-      MOQ: toInt(MOQ),
-      variations,
-      productDescription: productDescription ? String(productDescription).trim() : "",
-      mainImage: toImageObj(mainImage),
-      images: toImageObjArray(images),
-      status: "disapproved",
-      isActive: true,
-    };
+/* ---------------- Local Fallback (save PDFs in /uploads/invoices) ---------------- */
+function saveBufferLocally(buffer, filename, folder = "invoices") {
+  const dir = path.join(uploadDir, folder);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-    if (!payload.mainImage) return res.status(400).json({ message: 'mainImage must be a valid image object' });
+  const filePath = path.join(dir, `${filename}.pdf`);
+  fs.writeFileSync(filePath, buffer);
 
-    const saved = await Product.create(payload);
-    return res.status(201).json({ message: 'Product created (pending approval)', product: saved });
-  } catch (err) {
-    console.error('❌ Product creation error:', err);
-    return res.status(500).json({ message: 'Product creation failed', error: err.message });
-  }
+  return { url: `/uploads/${folder}/${filename}.pdf`, filePath };
+}
+
+/* ---------------- Exports ---------------- */
+module.exports = {
+  upload, // Multer for images
+  uploadRawBufferToCloudinary,
+  saveBufferLocally,
 };
