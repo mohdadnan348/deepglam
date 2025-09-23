@@ -22,12 +22,7 @@ router.post("/clone/:id", productCtrl.cloneProduct);
 // ========================================
 //router.post("/", verifyJWT, productCtrl.createProduct);
 // Single main image + multiple gallery images
-router.post(
-  "/",
-  upload.fields([
-    { name: "mainImage", maxCount: 1 },
-    { name: "images", maxCount: 10 },
-  ]),
+router.post("/", verifyJWT, upload.fields([ { name: "mainImage", maxCount: 1 }, { name: "images", maxCount: 10 },]),
   productCtrl.createProduct
 );
 router.get("/:id", productCtrl.getProductById);
