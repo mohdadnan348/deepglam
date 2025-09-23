@@ -15,7 +15,7 @@ router.get("/my", verifyJWT, orderCtrl.getOrders);
 router.get("/:orderId", verifyJWT, orderCtrl.getOrderById);
 router.get("/:orderId/bill", verifyJWT, orderCtrl.getBrandWiseBill);
 router.put("/:orderId/status", verifyJWT, orderCtrl.updateOrderStatus);
-router.delete("/:orderId", verifyJWT, orderCtrl.cancelOrder);
+//router.delete("/:orderId", verifyJWT, orderCtrl.cancelOrder);
 
 // ✅ 3. SELLER ROUTES
 router.get("/seller/dashboard", verifyJWT, requireRole(["seller"]), orderCtrl.getSellerDashboard);

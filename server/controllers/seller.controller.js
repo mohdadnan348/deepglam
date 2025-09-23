@@ -434,4 +434,3 @@ exports.getSellerById = async (req, res) => {
     });
   }
 };
-

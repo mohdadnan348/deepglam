@@ -19,6 +19,7 @@ router.get("/disapproved", sellerCtrl.getDisapprovedSellers);
 router.patch("/:sellerId/approve", sellerCtrl.approveSeller);
 router.patch("/:id/reject", sellerCtrl.rejectSeller);
 
+
 // ✅ IMPORTANT: Keep parameterized route at the END
 router.get("/:id", sellerCtrl.getSellerById); // 👈 keep this at the end
 

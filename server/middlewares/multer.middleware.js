@@ -1,36 +1,36 @@
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const express = require("express");
+const router = express.Router();
+const { verifyJWT } = require("../middlewares/auth.middleware");
+const productCtrl = require("../controllers/product.controller");
 
-// Ensure uploads directory exists
-const uploadDir = path.join(__dirname, '../uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
-}
+// ========================================
+// PUBLIC ROUTES (No Authentication)
+// ========================================
+router.get("/", productCtrl.getAllProducts);
 
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir); // uploads/ folder me save hoga
-  },
-  filename: function (req, file, cb) {
-    const uniqueName = `${Date.now()}-${file.originalname}`;
-    cb(null, uniqueName);
-  },
-});
+// ========================================
+// SPECIFIC ROUTES (Must come before /:id)
+// ========================================
+router.get("/my", verifyJWT, productCtrl.getProductsByUser);
+router.put("/approve/:id", productCtrl.approveProduct);
+router.put("/reject/:id", productCtrl.rejectProduct);
+router.post("/clone/:id", productCtrl.cloneProduct);
 
-const fileFilter = function (req, file, cb) {
-  const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png'];
-  if (allowedTypes.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    cb(new Error('Invalid file type. Only jpg, jpeg, and png allowed.'));
-  }
-};
+// ========================================
+// GENERAL CRUD ROUTES (Parameterized)
+// ========================================
+//router.post("/", verifyJWT, productCtrl.createProduct);
+// Single main image + multiple gallery images
+router.post(
+  "/",
+  upload.fields([
+    { name: "mainImage", maxCount: 1 },
+    { name: "images", maxCount: 10 },
+  ]),
+  productCtrl.createProduct
+);
+router.get("/:id", productCtrl.getProductById);
+router.put("/:id", productCtrl.updateProduct);
+router.delete("/:id", productCtrl.deleteProduct);
 
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
-});
-
-module.exports = upload;
+module.exports = router;

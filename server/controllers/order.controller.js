@@ -1131,122 +1131,259 @@ exports.bulkDispatchOrders = async (req, res) => {
 };
 
 
-// ✅ ENHANCED BRAND-WISE BILL WITH SELLER ADDRESS
-
+// ✅ COMPLETELY FIXED getBrandWiseBill function
 exports.getBrandWiseBill = async (req, res) => {
   try {
     const { orderId } = req.params;
     const { brand, sellerUserId } = req.query;
 
-    console.log("🔍 Fetching bill for:", { orderId, brand, sellerUserId });
+    console.log("🔍 getBrandWiseBill called with:", { 
+      orderId, 
+      brand, 
+      sellerUserId,
+      sellerUserIdType: typeof sellerUserId
+    });
 
+    // Input validation
     if (!brand || !sellerUserId) {
       return res.status(400).json({
         ok: false,
-        message: "Brand and sellerUserId parameters are required"
+        message: "Brand and sellerUserId query parameters are required"
       });
     }
 
+    if (!mongoose.Types.ObjectId.isValid(orderId)) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid order ID format"
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(sellerUserId)) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid seller ID format"
+      });
+    }
+
+    // STEP 1: Get order with comprehensive population
+    console.log("📋 Fetching order with ID:", orderId);
+    
     const order = await Order.findById(orderId)
-  .populate('buyerUserId', 'name phone email')
-  .populate('staffUserId', 'name phone email')
-  .populate({
-    path: 'products.sellerUserId',
-    select: 'name phone email businessName'
-  });
+      .populate({
+        path: 'buyerUserId',
+        select: 'name phone email businessName'
+      })
+      .populate({
+        path: 'staffUserId', 
+        select: 'name phone email'
+      })
+      .populate({
+        path: 'products.sellerUserId',
+        select: 'name phone email businessName'
+      })
+      .lean();
+
     if (!order) {
+      console.log("❌ Order not found");
       return res.status(404).json({
         ok: false,
         message: "Order not found"
       });
     }
 
-    // Filter products
-    const brandProducts = order.products.filter(product =>
-      product.brand === brand &&
-      product.sellerUserId.toString() === sellerUserId
-    );
+    console.log("✅ Order found:", order.orderNumber);
 
-    const brandBill = order.brandBreakdown.find(breakdown =>
-      breakdown.brand === brand &&
-      breakdown.sellerUserId.toString() === sellerUserId
-    );
+    // STEP 2: Find brand products with robust matching
+    console.log("🔍 Filtering products for brand:", brand, "seller:", sellerUserId);
 
-    if (!brandBill || brandProducts.length === 0) {
+    const brandProducts = order.products.filter(product => {
+      // Handle different sellerUserId formats
+      let productSellerId;
+      if (typeof product.sellerUserId === 'object' && product.sellerUserId !== null) {
+        productSellerId = product.sellerUserId._id;
+      } else {
+        productSellerId = product.sellerUserId;
+      }
+
+      const normalizedProductSellerId = productSellerId ? productSellerId.toString() : '';
+      const normalizedSearchSellerId = sellerUserId.toString();
+      const brandMatches = product.brand === brand;
+      const sellerMatches = normalizedProductSellerId === normalizedSearchSellerId;
+
+      console.log(`  Product: ${product.productName}, Brand: ${product.brand}(${brandMatches}), Seller: ${normalizedProductSellerId}(${sellerMatches})`);
+
+      return brandMatches && sellerMatches;
+    });
+
+    console.log("✅ Found brand products:", brandProducts.length);
+
+    if (brandProducts.length === 0) {
+      // Debug info
+      const availableOptions = order.products.map(p => {
+        const sellerId = typeof p.sellerUserId === 'object' ? p.sellerUserId._id : p.sellerUserId;
+        return { 
+          productName: p.productName,
+          brand: p.brand, 
+          sellerId: sellerId?.toString(),
+          sellerName: p.sellerUserId?.name || 'Unknown'
+        };
+      });
+      
+      console.log("❌ No products found. Available options:", availableOptions);
+      
       return res.status(404).json({
         ok: false,
-        message: "Brand bill not found"
+        message: `No products found for brand "${brand}" and seller "${sellerUserId}"`,
+        debug: {
+          availableOptions,
+          searchCriteria: { brand, sellerUserId },
+          orderNumber: order.orderNumber
+        }
       });
     }
 
-    // ✅ DIRECT SELLER FETCH - NO COMPLICATIONS
-    console.log("📋 Fetching seller with ID:", sellerUserId);
+    // STEP 3: Find or calculate brand breakdown
+    console.log("🔍 Looking for brand breakdown...");
 
-    const User = require('../models/user.model');
+    let brandBill = order.brandBreakdown?.find(breakdown => {
+      let breakdownSellerId;
+      if (typeof breakdown.sellerUserId === 'object' && breakdown.sellerUserId !== null) {
+        breakdownSellerId = breakdown.sellerUserId._id || breakdown.sellerUserId;
+      } else {
+        breakdownSellerId = breakdown.sellerUserId;
+      }
+
+      const normalizedBreakdownSellerId = breakdownSellerId ? breakdownSellerId.toString() : '';
+      const normalizedSearchSellerId = sellerUserId.toString();
+      const brandMatches = breakdown.brand === brand;
+      const sellerMatches = normalizedBreakdownSellerId === normalizedSearchSellerId;
+
+      return brandMatches && sellerMatches;
+    });
+
+    // If no brand breakdown found, calculate it manually
+    if (!brandBill) {
+      console.log("⚠️ Brand breakdown not found in order, calculating manually...");
+      
+      const subtotalPaise = brandProducts.reduce((sum, p) => sum + (p.totalPaise || 0), 0);
+      const taxPaise = Math.round(subtotalPaise * 0.18); // 18% tax
+      const totalPaise = subtotalPaise + taxPaise;
+
+      brandBill = {
+        brand: brand,
+        sellerUserId: sellerUserId,
+        subtotalPaise,
+        taxPaise,
+        totalPaise
+      };
+    }
+
+    console.log("✅ Brand bill data ready");
+
+    // STEP 4: Get comprehensive seller information
+    console.log("👤 Fetching seller information for ID:", sellerUserId);
+
     const Seller = require('../models/seller.model');
 
     const [userInfo, sellerProfile] = await Promise.all([
-      User.findById(sellerUserId).lean(),
-      Seller.findOne({ userId: sellerUserId }).lean()
+      User.findById(sellerUserId).select('name email phone businessName').lean(),
+      Seller.findOne({ userId: sellerUserId }).select('brandName fullAddress gstNumber').lean()
     ]);
 
-    console.log("👤 User Info:", userInfo);
-    console.log("🏪 Seller Profile:", sellerProfile);
+    console.log("👤 User info found:", !!userInfo);
+    console.log("🏪 Seller profile found:", !!sellerProfile);
 
-    // ✅ BUILD SELLER OBJECT
+    // STEP 5: Build comprehensive seller object
     const seller = {
       name: userInfo?.name || "Unknown Seller",
       email: userInfo?.email || "N/A",
       phone: userInfo?.phone || "N/A",
-      businessName: sellerProfile?.brandName || userInfo?.businessName || brand,
-      address: sellerProfile?.fullAddress ? {
-        street: `${sellerProfile.fullAddress.line1}${sellerProfile.fullAddress.line2 ? ', ' + sellerProfile.fullAddress.line2 : ''}`,
-        city: sellerProfile.fullAddress.city,
-        state: sellerProfile.fullAddress.state,
-        postalCode: sellerProfile.fullAddress.postalCode
-      } : {
+      businessName: sellerProfile?.brandName || userInfo?.businessName || brand || "Unknown Business",
+      gstNumber: sellerProfile?.gstNumber || "N/A"
+    };
+
+    // Add address information
+    if (sellerProfile?.fullAddress) {
+      const addr = sellerProfile.fullAddress;
+      seller.address = {
+        street: `${addr.line1 || ''}${addr.line2 ? ', ' + addr.line2 : ''}`.trim() || "Address not provided",
+        city: addr.city || "Unknown",
+        state: addr.state || "Unknown", 
+        postalCode: addr.postalCode || "000000",
+        country: addr.country || "India"
+      };
+    } else {
+      seller.address = {
         street: "Address not provided",
         city: "Unknown",
         state: "Unknown",
-        postalCode: "000000"
+        postalCode: "000000",
+        country: "India"
+      };
+    }
+
+    // STEP 6: Build buyer information
+    const buyer = {
+      name: order.buyerUserId?.name || "Unknown Buyer",
+      phone: order.buyerUserId?.phone || "N/A",
+      email: order.buyerUserId?.email || "N/A",
+      address: order.deliveryAddress || {
+        shopName: "N/A",
+        fullAddress: "Address not provided",
+        city: "Unknown",
+        state: "Unknown",
+        postalCode: "000000",
+        country: "India"
       }
     };
 
-    console.log("✅ Final Seller Object:", seller);
+    // STEP 7: Build staff information
+    const staff = order.staffUserId ? {
+      name: order.staffUserId.name || "Unknown Staff",
+      phone: order.staffUserId.phone || "N/A",
+      email: order.staffUserId.email || "N/A",
+      employeeCode: order.employeeCode || "N/A"
+    } : null;
 
+    // STEP 8: Format products for bill
+    const formattedProducts = brandProducts.map(product => ({
+      name: product.productName || "Unknown Product",
+      quantity: product.quantity || 1,
+      pricePerUnit: ((product.pricePerUnitPaise || 0) / 100).toFixed(2),
+      total: ((product.totalPaise || 0) / 100).toFixed(2)
+    }));
+
+    // STEP 9: Format amounts
+    const amounts = {
+      subtotal: ((brandBill.subtotalPaise || 0) / 100).toFixed(2),
+      tax: ((brandBill.taxPaise || 0) / 100).toFixed(2),  
+      total: ((brandBill.totalPaise || 0) / 100).toFixed(2)
+    };
+
+    // STEP 10: Build final bill data
     const billData = {
-      orderNumber: order.orderNumber,
-      billNumber: `BILL-${order.orderNumber}-${brand.toUpperCase()}`,
-      buyer: {
-        name: order.buyerUserId.name,
-        phone: order.buyerUserId.phone,
-        email: order.buyerUserId.email,
-        address: order.deliveryAddress
-      },
-      seller: seller,
-      staff: order.staffUserId ? {
-        name: order.staffUserId.name,
-        phone: order.staffUserId.phone,
-        email: order.staffUserId.email,
-        employeeCode: order.employeeCode
-      } : null,
-      brand: brand,
-      products: brandProducts.map(product => ({
-        name: product.productName,
-        quantity: product.quantity,
-        pricePerUnit: (product.pricePerUnitPaise / 100).toFixed(2),
-        total: (product.totalPaise / 100).toFixed(2)
-      })),
-      amounts: {
-        subtotal: (brandBill.subtotalPaise / 100).toFixed(2),
-        tax: (brandBill.taxPaise / 100).toFixed(2),
-        total: (brandBill.totalPaise / 100).toFixed(2)
-      },
+      orderNumber: order.orderNumber || "N/A",
+      billNumber: `BILL-${order.orderNumber || 'UNKNOWN'}-${brand.toUpperCase()}`,
+      buyer,
+      seller,
+      staff,
+      brand,
+      products: formattedProducts,
+      amounts,
       dates: {
-        orderDate: order.createdAt,
+        orderDate: order.createdAt || new Date(),
         billDate: new Date()
+      },
+      metadata: {
+        originalOrderId: order._id,
+        brandBreakdownId: brandBill._id,
+        generatedAt: new Date(),
+        productsCount: formattedProducts.length
       }
     };
+
+    console.log("✅ Bill generated successfully");
 
     res.json({
       ok: true,
@@ -1255,15 +1392,197 @@ exports.getBrandWiseBill = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ Generate brand bill error:", error);
+    console.error("❌ getBrandWiseBill error:", error);
     res.status(500).json({
       ok: false,
-      message: "Failed to generate brand bill",
-      error: error.message
+      message: "Failed to generate brand-wise bill",
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 };
 
+// ✅ ENHANCED getOrderById with better seller data population
+exports.getOrderById = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+    const userId = req.user._id;
+    const userRole = req.user.role;
+
+    console.log("🔍 Fetching order:", orderId, "for user role:", userRole);
+
+    if (!mongoose.Types.ObjectId.isValid(orderId)) {
+      return res.status(400).json({
+        ok: false,
+        message: "Invalid order ID format"
+      });
+    }
+
+    // Step 1: Get order with comprehensive populations
+    const order = await Order.findById(orderId)
+      .populate('buyerUserId', 'name phone email businessName')
+      .populate('staffUserId', 'name phone email')
+      .populate({
+        path: 'products.product',
+        select: 'productName brand mainImage'
+      })
+      .populate({
+        path: 'products.sellerUserId',
+        select: 'name phone email businessName'
+      });
+
+    if (!order) {
+      return res.status(404).json({
+        ok: false,
+        message: "Order not found"
+      });
+    }
+
+    console.log("📋 Order found, checking authorization...");
+
+    // Step 2: Authorization check
+    let hasAccess = false;
+
+    if (userRole === "admin") {
+      hasAccess = true;
+    } else if (userRole === "buyer") {
+      hasAccess = order.buyerUserId._id.toString() === userId.toString();
+    } else if (userRole === "staff") {
+      hasAccess = order.staffUserId?._id.toString() === userId.toString();
+    } else if (userRole === "seller") {
+      hasAccess = order.products.some(product => 
+        product.sellerUserId?.toString() === userId.toString()
+      );
+    }
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        ok: false,
+        message: "Access denied - this order doesn't belong to you"
+      });
+    }
+
+    console.log("✅ Authorization passed, enhancing data...");
+
+    // Step 3: Enhance brandBreakdown with seller information
+    if (order.brandBreakdown && order.brandBreakdown.length > 0) {
+      // Get unique seller IDs from products (not from brandBreakdown)
+      const sellerIds = [...new Set(order.products
+        .map(p => p.sellerUserId?._id || p.sellerUserId)
+        .filter(id => id)
+        .map(id => id.toString())
+      )];
+
+      console.log("🔍 Seller IDs found:", sellerIds);
+
+      if (sellerIds.length > 0) {
+        const Seller = require('../models/seller.model');
+        
+        // Fetch additional seller profiles
+        const [sellerProfiles, sellerUsers] = await Promise.all([
+          Seller.find({ userId: { $in: sellerIds } })
+            .select('userId brandName fullAddress gstNumber')
+            .lean(),
+          User.find({ _id: { $in: sellerIds } })
+            .select('name phone email businessName')
+            .lean()
+        ]);
+
+        // Create enhanced seller maps
+        const sellerProfileMap = new Map();
+        const sellerUserMap = new Map();
+        
+        sellerProfiles.forEach(seller => {
+          sellerProfileMap.set(seller.userId.toString(), seller);
+        });
+        
+        sellerUsers.forEach(user => {
+          sellerUserMap.set(user._id.toString(), user);
+        });
+
+        // Enhance brandBreakdown with complete seller info
+        order.brandBreakdown = order.brandBreakdown.map(breakdown => {
+          // Find the correct seller ID for this brand
+          const brandProduct = order.products.find(p => 
+            p.brand === breakdown.brand && 
+            (p.sellerUserId?._id?.toString() || p.sellerUserId?.toString())
+          );
+          
+          if (brandProduct) {
+            const sellerId = (brandProduct.sellerUserId?._id || brandProduct.sellerUserId).toString();
+            const sellerProfile = sellerProfileMap.get(sellerId);
+            const sellerUser = sellerUserMap.get(sellerId);
+            
+            // Enhanced breakdown with seller info
+            return {
+              ...breakdown.toObject ? breakdown.toObject() : breakdown,
+              sellerUserId: sellerId, // Ensure this is a string for consistent comparison
+              sellerInfo: {
+                _id: sellerId,
+                name: sellerUser?.name || brandProduct.sellerUserId?.name || "Unknown Seller",
+                phone: sellerUser?.phone || brandProduct.sellerUserId?.phone || "N/A",
+                email: sellerUser?.email || brandProduct.sellerUserId?.email || "N/A",
+                businessName: sellerProfile?.brandName || sellerUser?.businessName || breakdown.brand,
+                gstNumber: sellerProfile?.gstNumber || "N/A",
+                address: sellerProfile?.fullAddress ? {
+                  street: `${sellerProfile.fullAddress.line1 || ''}${sellerProfile.fullAddress.line2 ? ', ' + sellerProfile.fullAddress.line2 : ''}`.trim(),
+                  city: sellerProfile.fullAddress.city || "Unknown",
+                  state: sellerProfile.fullAddress.state || "Unknown",
+                  postalCode: sellerProfile.fullAddress.postalCode || "000000",
+                  country: sellerProfile.fullAddress.country || "India"
+                } : null
+              }
+            };
+          }
+          
+          return breakdown;
+        });
+
+        console.log("✅ Enhanced brandBreakdown with seller info");
+      }
+    }
+
+    // Step 4: Format response with all required fields
+    const formattedOrder = {
+      ...order.toObject(),
+      // Convert paise to rupees for display
+      finalAmount: order.finalAmountPaise ? (order.finalAmountPaise / 100) : 0,
+      subtotal: order.subtotalPaise ? (order.subtotalPaise / 100) : 0,
+      tax: order.taxPaise ? (order.taxPaise / 100) : 0,
+      discount: order.discountPaise ? (order.discountPaise / 100) : 0,
+
+      // Ensure required fields for frontend compatibility
+      items: order.products || [],
+      products: order.products || [],
+      address: order.deliveryAddress || null,
+      deliveryAddress: order.deliveryAddress || null,
+      statusHistory: order.statusLogs || [],
+      tracking: order.statusLogs || [],
+      paymentType: order.paymentType || 'COD',
+      paymentMethod: order.paymentType || 'COD',
+      
+      // Add computed fields
+      totalItems: order.products?.reduce((sum, p) => sum + (p.quantity || 0), 0) || 0,
+      brandCount: order.brandBreakdown?.length || 0
+    };
+
+    console.log("📤 Sending enhanced order response");
+
+    res.json({
+      ok: true,
+      data: formattedOrder,
+      order: formattedOrder // For backward compatibility
+    });
+
+  } catch (error) {
+    console.error("❌ getOrderById error:", error);
+    res.status(500).json({
+      ok: false,
+      message: "Failed to fetch order details",
+      error: error.message
+    });
+  }
+};
 // ✅ CANCEL ORDER
 exports.cancelOrder = async (req, res) => {
   try {
