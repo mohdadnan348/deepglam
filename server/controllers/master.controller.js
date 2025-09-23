@@ -2,9 +2,7 @@
 const HSN = require('../models/hsn.model');
 const Location = require('../models/location.model');
 const Banner = require('../models/banner.model');
-const Percentage = require('../models/percentage.model');
-const Profit = require('../models/profitMargin.model');
-
+const profitMargin = require('../models/profitMargin.model');
 
 // 📦 HSN: Create
 exports.createHSN = async (req, res) => {
@@ -107,34 +105,5 @@ exports.getBanners = async (req, res) => {
     res.json(banners);
   } catch (err) {
     res.status(500).json({ message: 'Failed to fetch banners' });
-  }
-};
-exports.addPercentage = async (req, res) => {
-  try {
-    const { value } = req.body;
-
-    const exists = await Percentage.findOne({ value });
-    if (exists) {
-      return res.status(400).json({ message: 'Percentage already exists' });
-    }
-
-    const percentage = new Percentage({ value });
-    await percentage.save();
-
-    res.status(201).json(percentage);
-  } catch (err) {
-    //console.error("Error in addPercentage:", err);  // 🔍 असली error यहाँ दिखेगा
-    res.status(500).json({ message: 'Failed to add percentage' });
-  }
-};
-
-
-// 📥 Percentage: Get All (for dropdown)
-exports.getPercentages = async (req, res) => {
-  try {
-    const percentages = await Percentage.find().sort({ value: 1 }); // ascending order
-    res.json(percentages);
-  } catch (err) {
-    res.status(500).json({ message: 'Failed to fetch percentages' });
   }
 };

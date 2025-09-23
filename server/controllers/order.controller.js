@@ -63,7 +63,7 @@ exports.createOrder = async (req, res) => {
       if (!product) throw new Error(`Product not found: ${item.productId}`);
 
       const quantity = Math.max(1, Number(item.quantity) || 1);
-
+      
       let pricePerUnitPaise;
       if (product.salePrice) {
         pricePerUnitPaise = Math.round(product.salePrice * 100);
@@ -72,7 +72,7 @@ exports.createOrder = async (req, res) => {
       } else {
         pricePerUnitPaise = 0;
       }
-
+      
       const totalPaise = quantity * pricePerUnitPaise;
       subtotalPaise += totalPaise;
 
@@ -89,7 +89,7 @@ exports.createOrder = async (req, res) => {
 
     // Auto-derive delivery address
     let finalDeliveryAddress;
-
+    
     if (deliveryAddress && deliveryAddress.shopName && deliveryAddress.fullAddress) {
       finalDeliveryAddress = {
         shopName: deliveryAddress.shopName,
@@ -181,9 +181,9 @@ exports.createOrder = async (req, res) => {
 // ✅ GET ORDERS (Role-based filtering)
 exports.getOrders = async (req, res) => {
   try {
-    const userId = req.user._id;
+    const userId = req.user._id; 
     const userRole = req.user.role;
-
+    
     const {
       page = 1,
       limit = 20,
@@ -211,7 +211,7 @@ exports.getOrders = async (req, res) => {
 
     if (status) filter.status = status;
     if (paymentStatus) filter.paymentStatus = paymentStatus;
-
+    
     if (dateFrom || dateTo) {
       filter.createdAt = {};
       if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
@@ -238,7 +238,7 @@ exports.getOrders = async (req, res) => {
     if (userRole === "seller") {
       filteredOrders = orders.map(order => ({
         ...order,
-        products: order.products.filter(product =>
+        products: order.products.filter(product => 
           product.sellerUserId?.toString() === userId.toString()
         ),
         // Calculate seller's portion
@@ -269,28 +269,79 @@ exports.getOrders = async (req, res) => {
   }
 };
 
-// ✅ GET ORDER BY ID - COMPLETE FUNCTION
+// ✅ GET ORDER BY ID
+// exports.getOrderById = async (req, res) => {
+//   try {
+//     const { orderId } = req.params;
+//     const userId = req.user._id;
+//     const userRole = req.user.role;
 
-// ✅ GET ORDER BY ID - COMPLETE FUNCTION WITH SELLER ADDRESS
+//     const order = await Order.findById(orderId)
+//       .populate('buyerUserId', 'name phone email')
+//       .populate('staffUserId', 'name phone email')
+//       .populate({
+//         path: 'products.product',
+//         select: 'productName brand mainImage'
+//       });
+
+//     if (!order) {
+//       return res.status(404).json({
+//         ok: false,
+//         message: "Order not found"
+//       });
+//     }
+
+//     // Authorization check
+//     let hasAccess = false;
+    
+//     if (userRole === "admin") {
+//       hasAccess = true;
+//     } else if (userRole === "buyer") {
+//       hasAccess = order.buyerUserId._id.toString() === userId.toString();
+//     } else if (userRole === "staff") {
+//       hasAccess = order.staffUserId._id.toString() === userId.toString();
+//     } else if (userRole === "seller") {
+//       hasAccess = order.products.some(product => 
+//         product.sellerUserId?.toString() === userId.toString()
+//       );
+//     }
+
+//     if (!hasAccess) {
+//       return res.status(403).json({
+//         ok: false,
+//         message: "Access denied - this order doesn't belong to you"
+//       });
+//     }
+
+//     res.json({
+//       ok: true,
+//       data: order
+//     });
+
+//   } catch (error) {
+//     console.error("Get order by ID error:", error);
+//     res.status(500).json({
+//       ok: false,
+//       message: "Failed to fetch order",
+//       error: error.message
+//     });
+//   }
+// };
+// controllers/order.controller.js में getOrderById function को update करें
+
+// ✅ GET ORDER BY ID
 exports.getOrderById = async (req, res) => {
   try {
     const { orderId } = req.params;
     const userId = req.user._id;
     const userRole = req.user.role;
 
-    console.log("🔍 Fetching order:", orderId);
-
-    // Step 1: Get order with basic populations
     const order = await Order.findById(orderId)
       .populate('buyerUserId', 'name phone email')
       .populate('staffUserId', 'name phone email')
       .populate({
         path: 'products.product',
         select: 'productName brand mainImage'
-      })
-      .populate({
-        path: 'products.sellerUserId',
-        select: 'name phone email businessName'
       });
 
     if (!order) {
@@ -300,11 +351,9 @@ exports.getOrderById = async (req, res) => {
       });
     }
 
-    console.log("📋 Order found, checking authorization...");
-
-    // Step 2: Authorization check
+    // Authorization check (same as before)
     let hasAccess = false;
-
+    
     if (userRole === "admin") {
       hasAccess = true;
     } else if (userRole === "buyer") {
@@ -324,96 +373,14 @@ exports.getOrderById = async (req, res) => {
       });
     }
 
-    console.log("✅ Authorization passed, fetching seller addresses...");
-
-    // Step 3: MANUAL SELLER ADDRESS POPULATION (SAME LOGIC AS getBrandWiseBill)
-    const sellerIds = [...new Set(order.products
-      .map(p => p.sellerUserId?._id)
-      .filter(id => id) // Remove null/undefined
-    )];
-
-    console.log("🔍 Seller IDs found:", sellerIds);
-
-    if (sellerIds.length > 0) {
-      const Seller = require('../models/seller.model');
-      const User = require('../models/user.model');
-      
-      // Fetch seller profiles with address
-      const sellerProfiles = await Seller.find({ 
-        userId: { $in: sellerIds } 
-      }).select('userId brandName fullAddress gstNumber').lean();
-      
-      console.log("🏪 Seller profiles found:", sellerProfiles);
-
-      // Create seller map for quick lookup
-      const sellerMap = new Map();
-      sellerProfiles.forEach(seller => {
-        sellerMap.set(seller.userId.toString(), seller);
-      });
-
-      console.log("🗺️ Seller map created:", Array.from(sellerMap.keys()));
-
-      // Step 4: Attach seller address data to each product
-      order.products.forEach((product, index) => {
-        if (product.sellerUserId?._id) {
-          const sellerId = product.sellerUserId._id.toString();
-          const sellerData = sellerMap.get(sellerId);
-          
-          console.log(`📦 Product ${index + 1} - Seller ID: ${sellerId}`);
-          console.log(`📋 Seller data found:`, sellerData ? "YES" : "NO");
-
-          if (sellerData) {
-            // ✅ SAME LOGIC AS getBrandWiseBill
-            product.sellerUserId.brandName = sellerData.brandName || product.sellerUserId.businessName || "Unknown Brand";
-            product.sellerUserId.gstNumber = sellerData.gstNumber;
-            
-            // Add formatted address
-            if (sellerData.fullAddress) {
-              product.sellerUserId.fullAddress = sellerData.fullAddress;
-              product.sellerUserId.address = {
-                street: `${sellerData.fullAddress.line1}${sellerData.fullAddress.line2 ? ', ' + sellerData.fullAddress.line2 : ''}`,
-                city: sellerData.fullAddress.city,
-                state: sellerData.fullAddress.state,
-                postalCode: sellerData.fullAddress.postalCode,
-                country: sellerData.fullAddress.country || "India"
-              };
-              console.log("✅ Address added for seller:", sellerId);
-            } else {
-              // Fallback address
-              product.sellerUserId.address = {
-                street: "Address not provided",
-                city: "Unknown",
-                state: "Unknown",
-                postalCode: "000000",
-                country: "India"
-              };
-              console.log("⚠️ No address found for seller:", sellerId);
-            }
-          } else {
-            console.log("❌ No seller profile found for:", sellerId);
-            // Add default address
-            product.sellerUserId.address = {
-              street: "Address not provided",
-              city: "Unknown",
-              state: "Unknown",
-              postalCode: "000000",
-              country: "India"
-            };
-          }
-        }
-      });
-    }
-
-    console.log("🏁 Seller address population completed");
-
-    // Step 5: Format response for frontend
+    // ✅ Format response for frontend (added this part)
     const formattedOrder = {
       ...order.toObject(),
       // Convert paise to rupees for display
       finalAmount: order.finalAmountPaise ? (order.finalAmountPaise / 100) : 0,
       subtotal: order.subtotalPaise ? (order.subtotalPaise / 100) : 0,
       tax: order.taxPaise ? (order.taxPaise / 100) : 0,
-
+      
       // Ensure required fields for tracking
       items: order.products || [],
       products: order.products || [],
@@ -425,15 +392,13 @@ exports.getOrderById = async (req, res) => {
       paymentMethod: order.paymentType || 'COD'
     };
 
-    console.log("📤 Sending formatted order response");
-
     res.json({
       ok: true,
       data: formattedOrder
     });
 
   } catch (error) {
-    console.error("❌ Get order by ID error:", error);
+    console.error("Get order by ID error:", error);
     res.status(500).json({
       ok: false,
       message: "Failed to fetch order",
@@ -452,14 +417,14 @@ exports.getSellerDashboard = async (req, res) => {
   try {
     const sellerId = req.user._id;
     const { period = "30" } = req.query;
-
+    
     if (req.user.role !== "seller") {
       return res.status(403).json({
         ok: false,
         message: "Access denied - sellers only"
       });
     }
-
+    
     const dateFrom = new Date();
     dateFrom.setDate(dateFrom.getDate() - parseInt(period));
 
@@ -522,7 +487,7 @@ exports.getSellerDashboard = async (req, res) => {
           buyer: order.buyerUserId,
           status: order.status,
           createdAt: order.createdAt,
-          sellerProducts: order.products.filter(p =>
+          sellerProducts: order.products.filter(p => 
             p.sellerUserId.toString() === sellerId.toString()
           ).length
         }))
@@ -543,15 +508,15 @@ exports.getSellerDashboard = async (req, res) => {
 exports.getSellerEarnings = async (req, res) => {
   try {
     const sellerId = req.user._id;
-
+    
     if (req.user.role !== "seller") {
       return res.status(403).json({
         ok: false,
         message: "Access denied - sellers only"
       });
     }
-
-    const {
+    
+    const { 
       period = "monthly",
       year = new Date().getFullYear(),
       month = new Date().getMonth() + 1
@@ -615,16 +580,16 @@ exports.getSellerEarnings = async (req, res) => {
 exports.getStaffDashboard = async (req, res) => {
   try {
     const staffId = req.user._id;
-
+    
     if (req.user.role !== "staff") {
       return res.status(403).json({
         ok: false,
         message: "Access denied - staff only"
       });
     }
-
+    
     const { period = "30" } = req.query;
-
+    
     const dateFrom = new Date();
     dateFrom.setDate(dateFrom.getDate() - parseInt(period));
 
@@ -665,23 +630,19 @@ exports.getStaffDashboard = async (req, res) => {
         .limit(5),
       Order.aggregate([
         { $match: { staffUserId: staffId } },
-        {
-          $group: {
-            _id: "$buyerUserId",
-            totalOrders: { $sum: 1 },
-            totalAmount: { $sum: "$finalAmountPaise" }
-          }
-        },
+        { $group: { 
+          _id: "$buyerUserId", 
+          totalOrders: { $sum: 1 },
+          totalAmount: { $sum: "$finalAmountPaise" }
+        }},
         { $sort: { totalAmount: -1 } },
         { $limit: 5 },
-        {
-          $lookup: {
-            from: "users",
-            localField: "_id",
-            foreignField: "_id",
-            as: "buyer"
-          }
-        }
+        { $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id",
+          as: "buyer"
+        }}
       ])
     ]);
 
@@ -723,14 +684,14 @@ exports.getStaffDashboard = async (req, res) => {
 exports.getStaffBuyers = async (req, res) => {
   try {
     const staffId = req.user._id;
-
+    
     if (req.user.role !== "staff") {
       return res.status(403).json({
         ok: false,
         message: "Access denied - staff only"
       });
     }
-
+    
     const buyers = await BuyerProfile.find({ staffUserId: staffId })
       .populate('userId', 'name phone email')
       .select('shopName shopAddress approvalStatus kycVerified creditLimitPaise currentDuePaise')
@@ -741,8 +702,8 @@ exports.getStaffBuyers = async (req, res) => {
       buyers.map(async (buyer) => {
         const [totalOrders, pendingOrders, totalSpent] = await Promise.all([
           Order.countDocuments({ buyerUserId: buyer.userId._id }),
-          Order.countDocuments({
-            buyerUserId: buyer.userId._id,
+          Order.countDocuments({ 
+            buyerUserId: buyer.userId._id, 
             status: { $in: ["confirmed", "processing", "packed"] }
           }),
           Order.aggregate([
@@ -792,7 +753,7 @@ exports.updateOrderStatus = async (req, res) => {
     const userRole = req.user.role;
 
     const validStatuses = [
-      "confirmed", "processing", "packed",
+      "confirmed", "processing", "packed", 
       "shipped", "delivered", "cancelled"
     ];
 
@@ -814,7 +775,7 @@ exports.updateOrderStatus = async (req, res) => {
     // Role-based authorization
     let canUpdate = false;
     let allowedStatuses = [];
-
+    
     if (userRole === "admin") {
       canUpdate = true;
       allowedStatuses = validStatuses;
@@ -829,8 +790,8 @@ exports.updateOrderStatus = async (req, res) => {
       allowedStatuses = ["processing", "packed"];
     } else if (userRole === "buyer") {
       canUpdate = (
-        order.buyerUserId.toString() === userId.toString() &&
-        status === "cancelled" &&
+        order.buyerUserId.toString() === userId.toString() && 
+        status === "cancelled" && 
         !["shipped", "delivered"].includes(order.status)
       );
       allowedStatuses = ["cancelled"];
@@ -870,7 +831,7 @@ exports.updateOrderStatus = async (req, res) => {
     // Update order status
     order.status = status;
     if (!order.statusLogs) order.statusLogs = [];
-
+    
     order.statusLogs.push({
       timestamp: new Date(),
       actionBy: userId,
@@ -941,7 +902,7 @@ exports.updatePaymentStatus = async (req, res) => {
 
     // Update payment status
     order.paidAmountPaise = newPaidAmount;
-
+    
     if (newPaidAmount >= order.finalAmountPaise) {
       order.paymentStatus = "paid";
     } else if (newPaidAmount > 0) {
@@ -1000,28 +961,28 @@ exports.bulkUpdateOrders = async (req, res) => {
     }
 
     const results = [];
-
+    
     for (const orderId of orderIds) {
       try {
         const order = await Order.findById(orderId);
         if (order) {
           // Staff can only update their buyers' orders
-          if (userRole === "staff" &&
-            order.staffUserId.toString() !== userId.toString()) {
+          if (userRole === "staff" && 
+              order.staffUserId.toString() !== userId.toString()) {
             results.push({ orderId, success: false, error: "Access denied" });
             continue;
           }
 
           order.status = status;
           if (!order.statusLogs) order.statusLogs = [];
-
+          
           order.statusLogs.push({
             timestamp: new Date(),
             actionBy: userId,
             action: `BULK_${status.toUpperCase()}`,
             note
           });
-
+          
           await order.save();
           results.push({ orderId, success: true });
         } else {
@@ -1078,10 +1039,10 @@ exports.bulkDispatchOrders = async (req, res) => {
         const order = await Order.findOne(filter);
 
         if (!order) {
-          results.push({
-            orderId,
-            success: false,
-            error: "Order not found or not ready for dispatch"
+          results.push({ 
+            orderId, 
+            success: false, 
+            error: "Order not found or not ready for dispatch" 
           });
           continue;
         }
@@ -1130,270 +1091,121 @@ exports.bulkDispatchOrders = async (req, res) => {
   }
 };
 
-// ✅ COMPLETELY REWRITTEN BRAND-WISE BILL WITH ROBUST ERROR HANDLING
+
+// ✅ ENHANCED BRAND-WISE BILL WITH SELLER ADDRESS
+// controllers/order.controller.js में getBrandWiseBill function को replace करें
+
 exports.getBrandWiseBill = async (req, res) => {
   try {
     const { orderId } = req.params;
     const { brand, sellerUserId } = req.query;
 
-    console.log("🔍 getBrandWiseBill called with:", { 
-      orderId, 
-      brand, 
-      sellerUserId,
-      sellerUserIdType: typeof sellerUserId
-    });
+    console.log("🔍 Fetching bill for:", { orderId, brand, sellerUserId });
 
-    // Input validation
     if (!brand || !sellerUserId) {
       return res.status(400).json({
         ok: false,
-        message: "Brand and sellerUserId query parameters are required"
+        message: "Brand and sellerUserId parameters are required"
       });
     }
 
-    if (!mongoose.Types.ObjectId.isValid(orderId)) {
-      return res.status(400).json({
-        ok: false,
-        message: "Invalid order ID format"
-      });
-    }
-
-    if (!mongoose.Types.ObjectId.isValid(sellerUserId)) {
-      return res.status(400).json({
-        ok: false,
-        message: "Invalid seller ID format"
-      });
-    }
-
-    // STEP 1: Get order with comprehensive population
-    console.log("📋 Fetching order with ID:", orderId);
-    
     const order = await Order.findById(orderId)
-      .populate({
-        path: 'buyerUserId',
-        select: 'name phone email businessName'
-      })
-      .populate({
-        path: 'staffUserId', 
-        select: 'name phone email'
-      })
-      .populate({
-        path: 'products.sellerUserId',
-        select: 'name phone email businessName'
-      })
-      .lean(); // Use lean for better performance
+      .populate('buyerUserId', 'name phone email')
+      .populate('staffUserId', 'name phone email');
 
     if (!order) {
-      console.log("❌ Order not found");
       return res.status(404).json({
         ok: false,
         message: "Order not found"
       });
     }
 
-    console.log("✅ Order found:", order.orderNumber);
-    console.log("📦 Products count:", order.products?.length || 0);
-    console.log("🏢 Brand breakdown count:", order.brandBreakdown?.length || 0);
+    // Filter products
+    const brandProducts = order.products.filter(product => 
+      product.brand === brand && 
+      product.sellerUserId.toString() === sellerUserId
+    );
 
-    // STEP 2: Find brand products with robust matching
-    console.log("🔍 Filtering products for brand:", brand, "seller:", sellerUserId);
+    const brandBill = order.brandBreakdown.find(breakdown =>
+      breakdown.brand === brand && 
+      breakdown.sellerUserId.toString() === sellerUserId
+    );
 
-    const brandProducts = order.products.filter(product => {
-      // Handle different sellerUserId formats in products
-      let productSellerId;
-      if (typeof product.sellerUserId === 'object' && product.sellerUserId !== null) {
-        productSellerId = product.sellerUserId._id;
-      } else {
-        productSellerId = product.sellerUserId;
-      }
-
-      // Normalize for comparison
-      const normalizedProductSellerId = productSellerId ? productSellerId.toString() : '';
-      const normalizedSearchSellerId = sellerUserId.toString();
-      const brandMatches = product.brand === brand;
-      const sellerMatches = normalizedProductSellerId === normalizedSearchSellerId;
-
-      console.log(`  Product: ${product.productName}, Brand: ${product.brand}(${brandMatches}), Seller: ${normalizedProductSellerId}(${sellerMatches})`);
-
-      return brandMatches && sellerMatches;
-    });
-
-    console.log("✅ Found brand products:", brandProducts.length);
-
-    if (brandProducts.length === 0) {
-      // Debug info for troubleshooting
-      const availableOptions = order.products.map(p => {
-        const sellerId = typeof p.sellerUserId === 'object' ? p.sellerUserId._id : p.sellerUserId;
-        return { brand: p.brand, sellerId: sellerId?.toString() };
-      });
-      
-      console.log("❌ No products found. Available options:", availableOptions);
-      
+    if (!brandBill || brandProducts.length === 0) {
       return res.status(404).json({
         ok: false,
-        message: `No products found for brand "${brand}" and seller "${sellerUserId}"`,
-        debug: {
-          availableOptions,
-          searchCriteria: { brand, sellerUserId }
-        }
+        message: "Brand bill not found"
       });
     }
 
-    // STEP 3: Find brand breakdown with robust matching
-    console.log("🔍 Looking for brand breakdown...");
-
-    const brandBill = order.brandBreakdown?.find(breakdown => {
-      let breakdownSellerId;
-      if (typeof breakdown.sellerUserId === 'object' && breakdown.sellerUserId !== null) {
-        breakdownSellerId = breakdown.sellerUserId._id || breakdown.sellerUserId;
-      } else {
-        breakdownSellerId = breakdown.sellerUserId;
-      }
-
-      const normalizedBreakdownSellerId = breakdownSellerId ? breakdownSellerId.toString() : '';
-      const normalizedSearchSellerId = sellerUserId.toString();
-      const brandMatches = breakdown.brand === brand;
-      const sellerMatches = normalizedBreakdownSellerId === normalizedSearchSellerId;
-
-      console.log(`  Breakdown: Brand: ${breakdown.brand}(${brandMatches}), Seller: ${normalizedBreakdownSellerId}(${sellerMatches})`);
-
-      return brandMatches && sellerMatches;
-    });
-
-    if (!brandBill) {
-      console.log("❌ Brand breakdown not found");
-      const availableBreakdowns = order.brandBreakdown?.map(b => ({
-        brand: b.brand,
-        sellerId: typeof b.sellerUserId === 'object' ? b.sellerUserId._id : b.sellerUserId
-      })) || [];
-      
-      return res.status(404).json({
-        ok: false,
-        message: `Brand breakdown not found for brand "${brand}" and seller "${sellerUserId}"`,
-        debug: {
-          availableBreakdowns,
-          searchCriteria: { brand, sellerUserId }
-        }
-      });
-    }
-
-    console.log("✅ Found brand breakdown");
-
-    // STEP 4: Get comprehensive seller information
-    console.log("👤 Fetching seller information for ID:", sellerUserId);
-
+    // ✅ DIRECT SELLER FETCH - NO COMPLICATIONS
+    console.log("📋 Fetching seller with ID:", sellerUserId);
+    
+    const User = require('../models/user.model');
     const Seller = require('../models/seller.model');
-
-    // Parallel fetch for better performance
+    
     const [userInfo, sellerProfile] = await Promise.all([
-      User.findById(sellerUserId).select('name email phone businessName').lean(),
-      Seller.findOne({ userId: sellerUserId }).select('brandName fullAddress gstNumber').lean()
+      User.findById(sellerUserId).lean(),
+      Seller.findOne({ userId: sellerUserId }).lean()
     ]);
 
-    console.log("👤 User info found:", !!userInfo);
-    console.log("🏪 Seller profile found:", !!sellerProfile);
+    console.log("👤 User Info:", userInfo);
+    console.log("🏪 Seller Profile:", sellerProfile);
 
-    // STEP 5: Build comprehensive seller object
+    // ✅ BUILD SELLER OBJECT
     const seller = {
       name: userInfo?.name || "Unknown Seller",
       email: userInfo?.email || "N/A",
       phone: userInfo?.phone || "N/A",
-      businessName: sellerProfile?.brandName || userInfo?.businessName || brand || "Unknown Business",
-      gstNumber: sellerProfile?.gstNumber || "N/A"
-    };
-
-    // Add address information
-    if (sellerProfile?.fullAddress) {
-      seller.address = {
-        street: `${sellerProfile.fullAddress.line1 || ''}${sellerProfile.fullAddress.line2 ? ', ' + sellerProfile.fullAddress.line2 : ''}`.trim() || "Address not provided",
-        city: sellerProfile.fullAddress.city || "Unknown",
-        state: sellerProfile.fullAddress.state || "Unknown", 
-        postalCode: sellerProfile.fullAddress.postalCode || "000000",
-        country: sellerProfile.fullAddress.country || "India"
-      };
-    } else {
-      seller.address = {
+      businessName: sellerProfile?.brandName || userInfo?.businessName || brand,
+      address: sellerProfile?.fullAddress ? {
+        street: `${sellerProfile.fullAddress.line1}${sellerProfile.fullAddress.line2 ? ', ' + sellerProfile.fullAddress.line2 : ''}`,
+        city: sellerProfile.fullAddress.city,
+        state: sellerProfile.fullAddress.state,
+        postalCode: sellerProfile.fullAddress.postalCode
+      } : {
         street: "Address not provided",
         city: "Unknown",
         state: "Unknown",
-        postalCode: "000000",
-        country: "India"
-      };
-    }
-
-    console.log("✅ Built seller object:", {
-      name: seller.name,
-      businessName: seller.businessName,
-      hasAddress: !!sellerProfile?.fullAddress
-    });
-
-    // STEP 6: Build buyer information
-    const buyer = {
-      name: order.buyerUserId?.name || "Unknown Buyer",
-      phone: order.buyerUserId?.phone || "N/A",
-      email: order.buyerUserId?.email || "N/A",
-      address: order.deliveryAddress || {
-        shopName: "N/A",
-        fullAddress: "Address not provided",
-        city: "Unknown",
-        state: "Unknown",
-        postalCode: "000000",
-        country: "India"
+        postalCode: "000000"
       }
     };
 
-    // STEP 7: Build staff information (if available)
-    const staff = order.staffUserId ? {
-      name: order.staffUserId.name || "Unknown Staff",
-      phone: order.staffUserId.phone || "N/A",
-      email: order.staffUserId.email || "N/A",
-      employeeCode: order.employeeCode || "N/A"
-    } : null;
+    console.log("✅ Final Seller Object:", seller);
 
-    // STEP 8: Format products for bill
-    const formattedProducts = brandProducts.map(product => ({
-      name: product.productName || "Unknown Product",
-      quantity: product.quantity || 1,
-      pricePerUnit: ((product.pricePerUnitPaise || 0) / 100).toFixed(2),
-      total: ((product.totalPaise || 0) / 100).toFixed(2)
-    }));
-
-    // STEP 9: Format amounts
-    const amounts = {
-      subtotal: ((brandBill.subtotalPaise || 0) / 100).toFixed(2),
-      tax: ((brandBill.taxPaise || 0) / 100).toFixed(2),  
-      total: ((brandBill.totalPaise || 0) / 100).toFixed(2)
-    };
-
-    // STEP 10: Build final bill data
     const billData = {
-      orderNumber: order.orderNumber || "N/A",
-      billNumber: `BILL-${order.orderNumber || 'UNKNOWN'}-${brand.toUpperCase()}`,
-      buyer,
-      seller,
-      staff,
-      brand,
-      products: formattedProducts,
-      amounts,
-      dates: {
-        orderDate: order.createdAt || new Date(),
-        billDate: new Date()
+      orderNumber: order.orderNumber,
+      billNumber: `BILL-${order.orderNumber}-${brand.toUpperCase()}`,
+      buyer: {
+        name: order.buyerUserId.name,
+        phone: order.buyerUserId.phone,
+        email: order.buyerUserId.email,
+        address: order.deliveryAddress
       },
-      metadata: {
-        originalOrderId: order._id,
-        brandBreakdownId: brandBill._id,
-        generatedAt: new Date(),
-        productsCount: formattedProducts.length
+      seller: seller,
+      staff: order.staffUserId ? {
+        name: order.staffUserId.name,
+        phone: order.staffUserId.phone,
+        email: order.staffUserId.email,
+        employeeCode: order.employeeCode
+      } : null,
+      brand: brand,
+      products: brandProducts.map(product => ({
+        name: product.productName,
+        quantity: product.quantity,
+        pricePerUnit: (product.pricePerUnitPaise / 100).toFixed(2),
+        total: (product.totalPaise / 100).toFixed(2)
+      })),
+      amounts: {
+        subtotal: (brandBill.subtotalPaise / 100).toFixed(2),
+        tax: (brandBill.taxPaise / 100).toFixed(2),
+        total: (brandBill.totalPaise / 100).toFixed(2)
+      },
+      dates: {
+        orderDate: order.createdAt,
+        billDate: new Date()
       }
     };
-
-    console.log("✅ Bill generated successfully");
-    console.log("📊 Bill summary:", {
-      orderNumber: billData.orderNumber,
-      brand: billData.brand,
-      productsCount: billData.products.length,
-      total: billData.amounts.total
-    });
 
     res.json({
       ok: true,
@@ -1402,45 +1214,26 @@ exports.getBrandWiseBill = async (req, res) => {
     });
 
   } catch (error) {
-    console.error("❌ getBrandWiseBill error:", error);
+    console.error("❌ Generate brand bill error:", error);
     res.status(500).json({
       ok: false,
-      message: "Failed to generate brand-wise bill",
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      message: "Failed to generate brand bill",
+      error: error.message
     });
   }
 };
 
-// ✅ ENHANCED getOrderById with seller address population
-exports.getOrderById = async (req, res) => {
+
+
+// ✅ CANCEL ORDER
+exports.cancelOrder = async (req, res) => {
   try {
     const { orderId } = req.params;
+    const { reason = "" } = req.body;
     const userId = req.user._id;
     const userRole = req.user.role;
 
-    console.log("🔍 Fetching order:", orderId, "for user role:", userRole);
-
-    if (!mongoose.Types.ObjectId.isValid(orderId)) {
-      return res.status(400).json({
-        ok: false,
-        message: "Invalid order ID format"
-      });
-    }
-
-    // Step 1: Get order with basic populations
-    const order = await Order.findById(orderId)
-      .populate('buyerUserId', 'name phone email businessName')
-      .populate('staffUserId', 'name phone email')
-      .populate({
-        path: 'products.product',
-        select: 'productName brand mainImage'
-      })
-      .populate({
-        path: 'products.sellerUserId',
-        select: 'name phone email businessName'
-      });
-
+    const order = await Order.findById(orderId);
     if (!order) {
       return res.status(404).json({
         ok: false,
@@ -1448,141 +1241,53 @@ exports.getOrderById = async (req, res) => {
       });
     }
 
-    console.log("📋 Order found, checking authorization...");
-
-    // Step 2: Authorization check
-    let hasAccess = false;
-
-    if (userRole === "admin") {
-      hasAccess = true;
-    } else if (userRole === "buyer") {
-      hasAccess = order.buyerUserId._id.toString() === userId.toString();
-    } else if (userRole === "staff") {
-      hasAccess = order.staffUserId?._id.toString() === userId.toString();
-    } else if (userRole === "seller") {
-      hasAccess = order.products.some(product => 
-        product.sellerUserId?.toString() === userId.toString()
-      );
-    }
-
-    if (!hasAccess) {
+    // Authorization checks
+    if (userRole === "buyer" && order.buyerUserId.toString() !== userId.toString()) {
       return res.status(403).json({
         ok: false,
-        message: "Access denied - this order doesn't belong to you"
+        message: "Access denied"
       });
     }
 
-    console.log("✅ Authorization passed, enhancing seller data...");
-
-    // Step 3: Get unique seller IDs for address population
-    const sellerIds = [...new Set(order.products
-      .map(p => p.sellerUserId?._id)
-      .filter(id => id)
-    )];
-
-    console.log("🔍 Seller IDs found:", sellerIds.length);
-
-    // Step 4: Fetch seller profiles if we have seller IDs
-    if (sellerIds.length > 0) {
-      const Seller = require('../models/seller.model');
-      
-      const sellerProfiles = await Seller.find({ 
-        userId: { $in: sellerIds } 
-      }).select('userId brandName fullAddress gstNumber').lean();
-      
-      console.log("🏪 Seller profiles found:", sellerProfiles.length);
-
-      // Create seller map for quick lookup
-      const sellerMap = new Map();
-      sellerProfiles.forEach(seller => {
-        sellerMap.set(seller.userId.toString(), seller);
-      });
-
-      // Step 5: Enhance each product with seller address data
-      order.products.forEach((product, index) => {
-        if (product.sellerUserId?._id) {
-          const sellerId = product.sellerUserId._id.toString();
-          const sellerData = sellerMap.get(sellerId);
-          
-          if (sellerData) {
-            // Add enhanced seller info
-            product.sellerUserId.brandName = sellerData.brandName || product.sellerUserId.businessName || "Unknown Brand";
-            product.sellerUserId.gstNumber = sellerData.gstNumber;
-            
-            // Add formatted address
-            if (sellerData.fullAddress) {
-              product.sellerUserId.fullAddress = sellerData.fullAddress;
-              product.sellerUserId.address = {
-                street: `${sellerData.fullAddress.line1 || ''}${sellerData.fullAddress.line2 ? ', ' + sellerData.fullAddress.line2 : ''}`.trim(),
-                city: sellerData.fullAddress.city || "Unknown",
-                state: sellerData.fullAddress.state || "Unknown",
-                postalCode: sellerData.fullAddress.postalCode || "000000",
-                country: sellerData.fullAddress.country || "India"
-              };
-              console.log("✅ Address added for seller:", sellerId.slice(-6));
-            } else {
-              // Fallback address
-              product.sellerUserId.address = {
-                street: "Address not provided",
-                city: "Unknown", 
-                state: "Unknown",
-                postalCode: "000000",
-                country: "India"
-              };
-              console.log("⚠️ No address found for seller:", sellerId.slice(-6));
-            }
-          } else {
-            console.log("❌ No seller profile found for:", sellerId.slice(-6));
-            // Add default address
-            product.sellerUserId.address = {
-              street: "Address not provided", 
-              city: "Unknown",
-              state: "Unknown",
-              postalCode: "000000",
-              country: "India"
-            };
-          }
-        }
+    if (userRole === "staff" && order.staffUserId.toString() !== userId.toString()) {
+      return res.status(403).json({
+        ok: false,
+        message: "Access denied - not your buyer's order"
       });
     }
 
-    // Step 6: Format response with all required fields
-    const formattedOrder = {
-      ...order.toObject(),
-      // Convert paise to rupees for display
-      finalAmount: order.finalAmountPaise ? (order.finalAmountPaise / 100) : 0,
-      subtotal: order.subtotalPaise ? (order.subtotalPaise / 100) : 0,
-      tax: order.taxPaise ? (order.taxPaise / 100) : 0,
-      discount: order.discountPaise ? (order.discountPaise / 100) : 0,
+    // Check if order can be cancelled
+    if (["shipped", "delivered", "cancelled"].includes(order.status)) {
+      return res.status(400).json({
+        ok: false,
+        message: `Cannot cancel order with status: ${order.status}`
+      });
+    }
 
-      // Ensure required fields for frontend compatibility
-      items: order.products || [],
-      products: order.products || [],
-      address: order.deliveryAddress || null,
-      deliveryAddress: order.deliveryAddress || null,
-      statusHistory: order.statusLogs || [],
-      tracking: order.statusLogs || [],
-      paymentType: order.paymentType || 'COD',
-      paymentMethod: order.paymentType || 'COD',
-      
-      // Add computed fields
-      totalItems: order.products?.reduce((sum, p) => sum + (p.quantity || 0), 0) || 0,
-      brandCount: order.brandBreakdown?.length || 0
-    };
-
-    console.log("📤 Sending enhanced order response");
+    // Cancel order
+    order.status = "cancelled";
+    if (!order.statusLogs) order.statusLogs = [];
+    
+    order.statusLogs.push({
+      timestamp: new Date(),
+      actionBy: userId,
+      action: "CANCELLED",
+      note: reason || "Order cancelled by user"
+    });
+    
+    await order.save();
 
     res.json({
       ok: true,
-      data: formattedOrder,
-      order: formattedOrder // For backward compatibility
+      message: "Order cancelled successfully",
+      data: order
     });
 
   } catch (error) {
-    console.error("❌ getOrderById error:", error);
+    console.error("Cancel order error:", error);
     res.status(500).json({
       ok: false,
-      message: "Failed to fetch order details",
+      message: "Failed to cancel order",
       error: error.message
     });
   }
