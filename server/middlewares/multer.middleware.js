@@ -1,36 +1,45 @@
-const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const express = require("express");
+const router = express.Router();
+const multer = require("multer");
+const cloudinary = require("../config/cloudinary");
+const { Readable } = require("stream");
 
-// Ensure uploads directory exists
-const uploadDir = path.join(__dirname, '../uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
-}
+// Memory storage (file RAM me ayega, disk pe nahi)
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
 
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir); // uploads/ folder me save hoga
-  },
-  filename: function (req, file, cb) {
-    const uniqueName = `${Date.now()}-${file.originalname}`;
-    cb(null, uniqueName);
-  },
-});
+// ✅ Product Image Upload
+router.post("/upload", upload.single("image"), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ message: "No file uploaded" });
+    }
 
-const fileFilter = function (req, file, cb) {
-  const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png'];
-  if (allowedTypes.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    cb(new Error('Invalid file type. Only jpg, jpeg, and png allowed.'));
+    // Cloudinary upload
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder: "deepglam/products", // Cloudinary folder
+      },
+      (err, result) => {
+        if (err) {
+          console.error("Cloudinary error:", err);
+          return res.status(500).json({ message: "Cloudinary upload failed" });
+        }
+
+        // ✅ Ye URL sab devices par chalega
+        return res.json({
+          message: "Upload successful",
+          url: result.secure_url,
+          publicId: result.public_id,
+        });
+      }
+    );
+
+    Readable.from(req.file.buffer).pipe(stream);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Upload failed" });
   }
-};
-
-const upload = multer({
-  storage,
-  fileFilter,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
 });
 
-module.exports = upload;
+module.exports = router;
