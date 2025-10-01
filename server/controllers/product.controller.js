@@ -208,19 +208,64 @@ exports.updateProduct = async (req, res) => {
 /* ---------------------------------------
    LIST / FILTER PRODUCTS
 ----------------------------------------*/
+
+/* ---------------------------------------
+   LIST / FILTER PRODUCTS - ✅ FIXED
+   ----------------------------------------*/
 exports.getAllProducts = async (req, res) => {
   try {
-    const { approved, status, isActive } = req.query;
+    console.log("📥 getAllProducts query params:", req.query);
+    
+    const { 
+      approved, 
+      status, 
+      isActive, 
+      mainCategory,    // ✅ Added
+      subCategory,     // ✅ Added
+      sort,            // ✅ Added
+      limit,           // ✅ Added
+      page             // ✅ Added
+    } = req.query;
+    
     const filter = {};
-
+    
+    // ✅ Status filters
     if (approved === "true") filter.status = "approved";
     if (approved === "false") filter.status = "disapproved";
     if (status) filter.status = status;
+    
+    // ✅ Active filter
     if (isActive !== undefined) filter.isActive = isActive === "true";
-
+    
+    // ✅ Category filters - MAIN FIX
+    if (mainCategory) {
+      filter.mainCategory = mainCategory;
+      console.log("✅ Filtering by mainCategory:", mainCategory);
+    }
+    
+    if (subCategory) {
+      filter.subCategory = subCategory;
+      console.log("✅ Filtering by subCategory:", subCategory);
+    }
+    
+    console.log("🔍 MongoDB filter:", filter);
+    
+    // ✅ Sorting
+    const sortOption = sort || "-createdAt";
+    
+    // ✅ Pagination
+    const pageNum = parseInt(page) || 1;
+    const limitNum = parseInt(limit) || 20;
+    const skip = (pageNum - 1) * limitNum;
+    
     const products = await Product.find(filter)
       .populate('userId', 'name email role phone businessName address')
-      .sort({ createdAt: -1 });
+      .sort(sortOption)
+      .skip(skip)
+      .limit(limitNum);
+    
+    console.log(`📊 Found ${products.length} products with filter:`, filter);
+    
     res.json(products);
   } catch (err) {
     console.error('❌ Get all products error:', err);
