@@ -86,7 +86,7 @@ exports.createOrder = async (req, res) => {
         totalPaise
       };
     });
-
+    
     // Auto-derive delivery address
     let finalDeliveryAddress;
     
@@ -142,7 +142,7 @@ exports.createOrder = async (req, res) => {
     }
 
     await order.save();
-
+  
     // Populate response data
     const populatedOrder = await Order.findById(order._id)
       .populate('buyerUserId', 'name phone email')
@@ -151,7 +151,7 @@ exports.createOrder = async (req, res) => {
         path: 'products.product',
         select: 'productName brand mainImage'
       });
-
+    
     res.status(201).json({
       ok: true,
       message: "Order created successfully",

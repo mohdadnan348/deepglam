@@ -738,5 +738,61 @@ exports.getSalesReport = async (req, res) => {
       error: e.message
     });
   }
-};
+};// VERIFY EMPLOYEE CODE (safe - uses Staff and Seller variables already required)
+exports.verifyEmployeeCode = async (req, res) => {
+  try {
+    const code = String(req.params.code || "").trim().toUpperCase();
+    if (!code) {
+      return res.status(400).json({ ok: false, message: "Employee code is required" });
+    }
 
+    // 1) Try User collection (some apps store employeeCode on user with role 'staff')
+    try {
+      const user = await User.findOne({ employeeCode: code, role: "staff" }).lean();
+      if (user) {
+        const name = user.name || `${user.firstName || ""} ${user.lastName || ""}`.trim() || "Staff";
+        return res.json({ ok: true, data: { employeeName: name, staffUserId: user._id, role: user.role } });
+      }
+    } catch (uErr) {
+      console.warn("verifyEmployeeCode - user lookup error:", uErr && uErr.message ? uErr.message : uErr);
+    }
+
+    // 2) Try Staff collection (use the Staff variable required at file top)
+    if (typeof Staff !== "undefined" && Staff) {
+      try {
+        const staff = await Staff.findOne({ employeeCode: code }).populate("userId", "name").lean();
+        if (staff) {
+          const name = staff.userId?.name || staff.name || "Staff";
+          return res.json({
+            ok: true,
+            data: { employeeName: name, staffUserId: staff.userId?._id || staff._id, role: "staff" },
+          });
+        }
+      } catch (sErr) {
+        console.warn("verifyEmployeeCode - staff lookup error:", sErr && sErr.message ? sErr.message : sErr);
+      }
+    }
+
+    // 3) Try Seller collection (use Seller variable required at file top)
+    if (typeof Seller !== "undefined" && Seller) {
+      try {
+        const seller = await Seller.findOne({ employeeCode: code }).populate("userId", "name").lean();
+        if (seller) {
+          const name = seller.userId?.name || seller.brandName || "Seller";
+          return res.json({
+            ok: true,
+            data: { employeeName: name, staffUserId: seller.userId?._id || seller._id, role: "seller" },
+          });
+        }
+      } catch (selErr) {
+        console.warn("verifyEmployeeCode - seller lookup error:", selErr && selErr.message ? selErr.message : selErr);
+      }
+    }
+
+    // Not found anywhere
+    return res.status(404).json({ ok: false, message: "Employee code not found" });
+  } catch (err) {
+    console.error("verifyEmployeeCode error:", err);
+    return res.status(500).json({ ok: false, message: "Server error", error: err.message });
+  }
+};

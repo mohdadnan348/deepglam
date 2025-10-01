@@ -28,6 +28,6 @@ router.post("/:staffId/target", verifyJWT, requireRole(["admin"]), staffCtrl.set
 router.get("/:staffId/target", verifyJWT, requireRole(["admin", "staff"]), staffCtrl.getTarget);
 router.get("/:staffId/sales-report", verifyJWT, requireRole(["admin", "staff"]), staffCtrl.getSalesReport);
 
-
+router.get('/verify/:code', staffCtrl.verifyEmployeeCode);
 
 module.exports = router;
