@@ -79,9 +79,9 @@ const orderSchema = new mongoose.Schema({
     default: "unpaid",
     index: true
   },
- status: {
+  status: {
     type: String,
-    enum: ["confirmed","packed", "processing", "shipped", "delivered", "cancelled"],
+    enum: ["confirmed", "processing", "shipped", "delivered", "cancelled"],
     default: "confirmed",
     index: true
   },
