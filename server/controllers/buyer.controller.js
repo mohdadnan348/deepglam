@@ -5,6 +5,7 @@ const User = require("../models/user.model");
 const BuyerProfile = require("../models/buyer.model");
 const Order = require("../models/order.model");
 const ReturnRequest = require("../models/return.model");
+const Staff = require("../models/staff.model"); // added
 
 const toInt = (v, fallback = 0) => {
   const n = parseInt(v, 10);
@@ -63,6 +64,7 @@ exports.createBuyer = async (req, res) => {
     // Normalize
     const phoneNorm = phone.trim();
     const emailNorm = email ? email.trim().toLowerCase() : undefined;
+    const codeNorm = employeeCode.trim().toUpperCase();
 
     // Check existing user
     const existingUser = await User.findOne({
@@ -82,18 +84,36 @@ exports.createBuyer = async (req, res) => {
       }
     }
 
-    // ✅ Staff lookup by employeeCode
-    const staffUser = await User.findOne({
-      role: "staff",
-      employeeCode: employeeCode.trim().toUpperCase()
-    });
+    // ---------------- Robust Staff lookup by employeeCode ----------------
+    // Try: 1) User collection (role: staff, employeeCode)
+    //      2) Staff collection and populate linked userId
+    let staffUser = null;
+
+    try {
+      staffUser = await User.findOne({ role: "staff", employeeCode: codeNorm }).select("_id name phone email role");
+    } catch (uErr) {
+      console.warn("User lookup error for employeeCode:", uErr && uErr.message ? uErr.message : uErr);
+      staffUser = null;
+    }
+
+    if (!staffUser) {
+      try {
+        const staffRecord = await Staff.findOne({ employeeCode: codeNorm }).populate("userId", "_id name phone email role");
+        if (staffRecord && staffRecord.userId) {
+          staffUser = staffRecord.userId;
+        }
+      } catch (sErr) {
+        console.warn("Staff collection lookup error for employeeCode:", sErr && sErr.message ? sErr.message : sErr);
+      }
+    }
 
     if (!staffUser) {
       return res.status(400).json({
         ok: false,
-        message: "Staff not found for employee code: " + employeeCode
+        message: "Staff not found for employee code: " + codeNorm
       });
     }
+    // --------------------------------------------------------------------
 
     // Transaction
     const session = await mongoose.startSession();
@@ -123,7 +143,7 @@ exports.createBuyer = async (req, res) => {
       const buyerProfile = new BuyerProfile({
         userId: user._id,
         staffUserId: staffUser._id,
-        employeeCode: employeeCode.trim().toUpperCase(),
+        employeeCode: codeNorm,
         gender: gender.trim(),
 
         shopName: shopName.trim(),
