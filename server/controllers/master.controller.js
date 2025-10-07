@@ -1,16 +1,16 @@
-// 📁 server/controllers/master.controller.js
+// server/controllers/master.controller.js
+
+const mongoose = require('mongoose');
 const HSN = require('../models/hsn.model');
 const Location = require('../models/location.model');
 const Banner = require('../models/banner.model');
 const ProfitMargin = require('../models/profitMargin.model');
+const Coupon = require('../models/coupon.model');
 
-// ========================================
-// 📦 HSN CRUD Operations
-// ========================================
+// --------------------------
+// 📦 HSN CRUD
+// --------------------------
 
-
-
-// Create HSN
 exports.createHSN = async (req, res) => {
   try {
     const { hsnCode, description, gstPercentage } = req.body;
@@ -18,7 +18,6 @@ exports.createHSN = async (req, res) => {
     await hsn.save();
     res.status(201).json(hsn);
   } catch (err) {
-    // Handle duplicate key error
     if (err.code === 11000) {
       return res.status(400).json({ message: 'HSN Code already exists' });
     }
@@ -26,25 +25,21 @@ exports.createHSN = async (req, res) => {
   }
 };
 
-// Update HSN
 exports.updateHSN = async (req, res) => {
   try {
     const { id } = req.params;
     const { hsnCode, description, gstPercentage } = req.body;
-    
+
     const updatedHSN = await HSN.findByIdAndUpdate(
       id,
       { hsnCode, description, gstPercentage },
       { new: true, runValidators: true }
     );
-    
-    if (!updatedHSN) {
-      return res.status(404).json({ message: 'HSN not found' });
-    }
-    
+
+    if (!updatedHSN) return res.status(404).json({ message: 'HSN not found' });
+
     res.json(updatedHSN);
   } catch (err) {
-    // Handle duplicate key error
     if (err.code === 11000) {
       return res.status(400).json({ message: 'HSN Code already exists' });
     }
@@ -52,8 +47,6 @@ exports.updateHSN = async (req, res) => {
   }
 };
 
-
-// Get All HSNs
 exports.getHSNs = async (req, res) => {
   try {
     const hsns = await HSN.find();
@@ -63,43 +56,32 @@ exports.getHSNs = async (req, res) => {
   }
 };
 
-// Get Single HSN by ID
 exports.getHSNById = async (req, res) => {
   try {
     const { id } = req.params;
     const hsn = await HSN.findById(id);
-    
-    if (!hsn) {
-      return res.status(404).json({ message: 'HSN not found' });
-    }
-    
+    if (!hsn) return res.status(404).json({ message: 'HSN not found' });
     res.json(hsn);
   } catch (err) {
     res.status(500).json({ message: 'Failed to fetch HSN', error: err.message });
   }
 };
 
-// Delete HSN
 exports.deleteHSN = async (req, res) => {
   try {
     const { id } = req.params;
     const deletedHSN = await HSN.findByIdAndDelete(id);
-    
-    if (!deletedHSN) {
-      return res.status(404).json({ message: 'HSN not found' });
-    }
-    
+    if (!deletedHSN) return res.status(404).json({ message: 'HSN not found' });
     res.json({ message: 'HSN deleted successfully', data: deletedHSN });
   } catch (err) {
     res.status(500).json({ message: 'Failed to delete HSN', error: err.message });
   }
 };
 
-// ========================================
-// 🌍 LOCATION CRUD Operations
-// ========================================
+// --------------------------
+// 🌍 LOCATION CRUD
+// --------------------------
 
-// Create Location
 exports.createLocation = async (req, res) => {
   try {
     const { pincode, city, state } = req.body;
@@ -111,7 +93,6 @@ exports.createLocation = async (req, res) => {
   }
 };
 
-// Get All Locations
 exports.getAllLocations = async (req, res) => {
   try {
     const locations = await Location.find();
@@ -121,82 +102,62 @@ exports.getAllLocations = async (req, res) => {
   }
 };
 
-// Get Location by Pincode
 exports.getLocation = async (req, res) => {
   try {
     const { pincode } = req.params;
     const location = await Location.findOne({ pincode });
-
-    if (!location) {
-      return res.status(404).json({ message: 'Location not found' });
-    }
-
+    if (!location) return res.status(404).json({ message: 'Location not found' });
     res.json(location);
   } catch (err) {
     res.status(500).json({ message: 'Failed to fetch location', error: err.message });
   }
 };
 
-// Update Location (or Create if not exists)
 exports.upsertLocation = async (req, res) => {
   try {
     const { pincode, city, state } = req.body;
-
     const updated = await Location.findOneAndUpdate(
       { pincode },
       { city, state },
       { upsert: true, new: true }
     );
-
     res.json(updated);
   } catch (err) {
     res.status(500).json({ message: 'Failed to save location', error: err.message });
   }
 };
 
-// Update Location by ID
 exports.updateLocation = async (req, res) => {
   try {
     const { id } = req.params;
     const { pincode, city, state } = req.body;
-    
     const updatedLocation = await Location.findByIdAndUpdate(
       id,
       { pincode, city, state },
       { new: true, runValidators: true }
     );
-    
-    if (!updatedLocation) {
-      return res.status(404).json({ message: 'Location not found' });
-    }
-    
+    if (!updatedLocation) return res.status(404).json({ message: 'Location not found' });
     res.json(updatedLocation);
   } catch (err) {
     res.status(500).json({ message: 'Failed to update location', error: err.message });
   }
 };
 
-// Delete Location
 exports.deleteLocation = async (req, res) => {
   try {
     const { id } = req.params;
     const deletedLocation = await Location.findByIdAndDelete(id);
-    
-    if (!deletedLocation) {
-      return res.status(404).json({ message: 'Location not found' });
-    }
-    
+    if (!deletedLocation) return res.status(404).json({ message: 'Location not found' });
     res.json({ message: 'Location deleted successfully', data: deletedLocation });
   } catch (err) {
     res.status(500).json({ message: 'Failed to delete location', error: err.message });
   }
 };
 
-// ========================================
-// 💰 PROFIT MARGIN CRUD Operations
-// ========================================
+// --------------------------
+// 💰 PROFIT MARGIN CRUD
+// --------------------------
 
-// Create Profit Margin
 exports.createProfit = async (req, res) => {
   try {
     const { category, marginPercentage, applicableTo, isActive } = req.body;
@@ -208,30 +169,22 @@ exports.createProfit = async (req, res) => {
   }
 };
 
-// Update Profit Margin by ID
 exports.updateProfit = async (req, res) => {
   try {
     const { id } = req.params;
     const { category, marginPercentage, applicableTo, isActive } = req.body;
-    
     const updatedProfit = await ProfitMargin.findByIdAndUpdate(
       id,
       { category, marginPercentage, applicableTo, isActive },
       { new: true, runValidators: true }
     );
-    
-    if (!updatedProfit) {
-      return res.status(404).json({ message: 'Profit margin not found' });
-    }
-    
+    if (!updatedProfit) return res.status(404).json({ message: 'Profit margin not found' });
     res.json(updatedProfit);
   } catch (err) {
     res.status(500).json({ message: 'Failed to update profit margin', error: err.message });
   }
 };
 
-
-// Get All Profit Margins
 exports.getProfits = async (req, res) => {
   try {
     const profits = await ProfitMargin.find();
@@ -241,60 +194,46 @@ exports.getProfits = async (req, res) => {
   }
 };
 
-// Get Single Profit Margin by ID
 exports.getProfitById = async (req, res) => {
   try {
     const { id } = req.params;
     const profit = await ProfitMargin.findById(id);
-    
-    if (!profit) {
-      return res.status(404).json({ message: 'Profit margin not found' });
-    }
-    
+    if (!profit) return res.status(404).json({ message: 'Profit margin not found' });
     res.json(profit);
   } catch (err) {
     res.status(500).json({ message: 'Failed to fetch profit margin', error: err.message });
   }
 };
 
-// Set/Update Profit Margin (Upsert)
 exports.setProfit = async (req, res) => {
   try {
     const { category, profitPercentage } = req.body;
-
     const updated = await ProfitMargin.findOneAndUpdate(
       { category },
       { profitPercentage },
       { upsert: true, new: true }
     );
-
     res.json(updated);
   } catch (err) {
     res.status(500).json({ message: 'Failed to save profit %', error: err.message });
   }
 };
 
-// Delete Profit Margin
 exports.deleteProfit = async (req, res) => {
   try {
     const { id } = req.params;
     const deletedProfit = await ProfitMargin.findByIdAndDelete(id);
-    
-    if (!deletedProfit) {
-      return res.status(404).json({ message: 'Profit margin not found' });
-    }
-    
+    if (!deletedProfit) return res.status(404).json({ message: 'Profit margin not found' });
     res.json({ message: 'Profit margin deleted successfully', data: deletedProfit });
   } catch (err) {
     res.status(500).json({ message: 'Failed to delete profit margin', error: err.message });
   }
 };
 
-// ========================================
-// 🖼️ BANNER CRUD Operations
-// ========================================
+// --------------------------
+// 🖼️ BANNER CRUD
+// --------------------------
 
-// Create Banner
 exports.createBanner = async (req, res) => {
   try {
     const { image, linkType, linkId, title } = req.body;
@@ -306,7 +245,6 @@ exports.createBanner = async (req, res) => {
   }
 };
 
-// Get All Banners
 exports.getBanners = async (req, res) => {
   try {
     const banners = await Banner.find();
@@ -316,56 +254,174 @@ exports.getBanners = async (req, res) => {
   }
 };
 
-// Get Single Banner by ID
 exports.getBannerById = async (req, res) => {
   try {
     const { id } = req.params;
     const banner = await Banner.findById(id);
-    
-    if (!banner) {
-      return res.status(404).json({ message: 'Banner not found' });
-    }
-    
+    if (!banner) return res.status(404).json({ message: 'Banner not found' });
     res.json(banner);
   } catch (err) {
     res.status(500).json({ message: 'Failed to fetch banner', error: err.message });
   }
 };
 
-// Update Banner
 exports.updateBanner = async (req, res) => {
   try {
     const { id } = req.params;
     const { image, linkType, linkId, title } = req.body;
-    
     const updatedBanner = await Banner.findByIdAndUpdate(
       id,
       { image, linkType, linkId, title },
       { new: true, runValidators: true }
     );
-    
-    if (!updatedBanner) {
-      return res.status(404).json({ message: 'Banner not found' });
-    }
-    
+    if (!updatedBanner) return res.status(404).json({ message: 'Banner not found' });
     res.json(updatedBanner);
   } catch (err) {
     res.status(500).json({ message: 'Failed to update banner', error: err.message });
   }
 };
 
-// Delete Banner
 exports.deleteBanner = async (req, res) => {
   try {
     const { id } = req.params;
     const deletedBanner = await Banner.findByIdAndDelete(id);
-    
-    if (!deletedBanner) {
-      return res.status(404).json({ message: 'Banner not found' });
-    }
-    
+    if (!deletedBanner) return res.status(404).json({ message: 'Banner not found' });
     res.json({ message: 'Banner deleted successfully', data: deletedBanner });
   } catch (err) {
     res.status(500).json({ message: 'Failed to delete banner', error: err.message });
+  }
+};
+
+// --------------------------
+// 🎟️ COUPON CRUD + Validate + Mark-used
+// --------------------------
+
+// Create Coupon (Admin)
+exports.createCoupon = async (req, res) => {
+  try {
+    // expected fields from frontend - adjust names if your frontend uses different
+    const {
+      code,
+      discountType = 'percentage', // or 'fixed'
+      value,
+      expiryDate,
+      minOrderAmount = 0,
+      maxDiscount = null,
+      maxUses = null,
+      isActive = true,
+    } = req.body;
+
+    const coupon = new Coupon({
+      code: code.toUpperCase(),
+      type: discountType || 'percentage',
+      value,
+      minOrderAmount,
+      maxDiscount,
+      validFrom: new Date(),
+      validTill: expiryDate ? new Date(expiryDate) : null,
+      maxUses,
+      isActive,
+    });
+
+    await coupon.save();
+    res.status(201).json({ ok: true, data: coupon });
+  } catch (err) {
+    if (err.code === 11000) return res.status(400).json({ ok: false, message: 'Coupon code exists' });
+    res.status(500).json({ ok: false, message: 'Failed to create coupon', error: err.message });
+  }
+};
+
+// Get all coupons (Admin)
+exports.getCoupons = async (req, res) => {
+  try {
+    const coupons = await Coupon.find().sort({ createdAt: -1 });
+    res.json(coupons);
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to fetch coupons', error: err.message });
+  }
+};
+
+// Delete coupon (Admin)
+exports.deleteCoupon = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const deleted = await Coupon.findByIdAndDelete(id);
+    if (!deleted) return res.status(404).json({ message: 'Coupon not found' });
+    res.json({ message: 'Coupon deleted', data: deleted });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to delete coupon', error: err.message });
+  }
+};
+
+// Validate coupon (called from checkout to calculate discount)
+exports.validateCoupon = async (req, res) => {
+  try {
+    const { code, userId, cartTotal } = req.body;
+    if (!code) return res.status(400).json({ ok: false, message: 'Coupon code required' });
+
+    const coupon = await Coupon.findOne({ code: code.toUpperCase(), isActive: true });
+    if (!coupon) return res.status(404).json({ ok: false, message: 'Coupon not found or inactive' });
+
+    const now = new Date();
+    if (coupon.validFrom && now < new Date(coupon.validFrom)) return res.status(400).json({ ok: false, message: 'Coupon not active yet' });
+    if (coupon.validTill && now > new Date(coupon.validTill)) return res.status(400).json({ ok: false, message: 'Coupon expired' });
+
+    if (cartTotal < (coupon.minOrderAmount || 0)) return res.status(400).json({ ok: false, message: `Minimum order ₹${coupon.minOrderAmount} required` });
+
+    if (coupon.maxUses != null && coupon.usedCount >= coupon.maxUses) return res.status(400).json({ ok: false, message: 'Coupon usage limit reached' });
+
+    if (userId && coupon.usedBy && coupon.usedBy.includes(userId)) return res.status(400).json({ ok: false, message: 'You have already used this coupon' });
+
+    let discountAmount = 0;
+    if (coupon.type === 'percentage') discountAmount = (cartTotal * coupon.value) / 100;
+    else discountAmount = coupon.value;
+
+    if (coupon.maxDiscount != null) discountAmount = Math.min(discountAmount, coupon.maxDiscount);
+    if (discountAmount > cartTotal) discountAmount = cartTotal;
+
+    const newTotal = Math.max(0, cartTotal - discountAmount);
+
+    return res.json({
+      ok: true,
+      coupon: {
+        id: coupon._id,
+        code: coupon.code,
+        type: coupon.type,
+        value: coupon.value,
+      },
+      discountAmount,
+      newTotal,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: 'Failed to validate coupon', error: err.message });
+  }
+};
+
+// Mark coupon used — call after payment/order confirmed
+exports.markCouponUsed = async (req, res) => {
+  try {
+    const { couponId, userId } = req.body;
+    if (!couponId) return res.status(400).json({ ok: false, message: 'couponId required' });
+
+    // Atomic update: only increment if maxUses is null or usedCount < maxUses
+    const coupon = await Coupon.findOneAndUpdate(
+      {
+        _id: mongoose.Types.ObjectId(couponId),
+        $or: [{ maxUses: null }, { $expr: { $lt: ['$usedCount', '$maxUses'] } }],
+      },
+      {
+        $inc: { usedCount: 1 },
+        ...(userId ? { $addToSet: { usedBy: mongoose.Types.ObjectId(userId) } } : {}),
+      },
+      { new: true }
+    );
+
+    if (!coupon) return res.status(400).json({ ok: false, message: 'Coupon not found or usage limit reached' });
+
+    return res.json({ ok: true, message: 'Coupon usage recorded', coupon });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ ok: false, message: 'Failed to mark coupon used', error: err.message });
   }
 };

@@ -33,4 +33,11 @@ router.get('/banner/:id', masterController.getBannerById);
 router.put('/banner/:id', masterController.updateBanner);
 router.delete('/banner/:id', masterController.deleteBanner);
 
+router.post('/coupons', masterController.createCoupon);
+router.get('/coupons', masterController.getCoupons);
+router.delete('/coupons/:id', masterController.deleteCoupon);
+router.post('/coupons/validate', masterController.validateCoupon);
+router.post('/coupons/mark-used', masterController.markCouponUsed);
+
+
 module.exports = router;
