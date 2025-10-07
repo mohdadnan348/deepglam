@@ -12,9 +12,8 @@ router.post("/", sellerCtrl.createSeller);
 router.get("/my/stats", verifyJWT, sellerCtrl.getMyStats);
 
 // ✅ My brand (must be before parameterized routes)
+router.get("/my/profile", verifyJWT, sellerCtrl.getMyProfile);
 
-
-// ✅ ADMIN MANAGEMENT 
 router.get("/", sellerCtrl.getAllSellers);
 router.get("/disapproved", sellerCtrl.getDisapprovedSellers);
 router.patch("/:sellerId/approve", sellerCtrl.approveSeller);

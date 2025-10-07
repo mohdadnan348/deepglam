@@ -435,3 +435,63 @@ exports.getSellerById = async (req, res) => {
   }
 };
 
+
+// ✅ Get currently logged-in seller's profile
+exports.getMyProfile = async (req, res) => {
+  try {
+    // Agar aapke paas helper hai:
+    // const sellerId = await resolveSellerId(req);
+    // use kar sakte ho; warna niche direct logic bhi kaam karega.
+
+    let sellerId;
+
+    // Check if sellerId is in req.user (depends on your JWT structure)
+    if (req.user?.sellerId) {
+      sellerId = req.user.sellerId;
+    } else {
+      // Fallback: find seller by userId (user._id from JWT)
+      const seller = await Seller.findOne({ userId: req.user._id });
+      if (!seller) {
+        return res.status(404).json({
+          ok: false,
+          message: "Seller not found for this user",
+        });
+      }
+      sellerId = seller._id;
+    }
+
+    const seller = await Seller.findById(sellerId)
+      .populate("userId", "name email phone role")
+      .lean();
+
+    if (!seller) {
+      return res.status(404).json({
+        ok: false,
+        message: "Seller not found",
+      });
+    }
+
+    // ✅ Structure matches what your frontend expects
+    return res.json({
+      ok: true,
+      data: {
+        sellerId: seller._id,
+        userId: seller.userId?._id,
+        name: seller.userId?.name,
+        email: seller.userId?.email,
+        phone: seller.userId?.phone,
+        brandName: seller.brandName,
+        gstNumber: seller.gstNumber,
+        status: seller.status,
+        createdAt: seller.createdAt,
+      },
+    });
+  } catch (error) {
+    console.error("❌ Error in getMyProfile:", error);
+    return res.status(500).json({
+      ok: false,
+      message: "Failed to fetch seller profile",
+      error: error.message,
+    });
+  }
+};
