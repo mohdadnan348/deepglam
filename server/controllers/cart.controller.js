@@ -7,7 +7,7 @@ const cartController = {
   getCart: async (req, res) => {
     try {
       const userId = req.user.id;
-      
+
       let cart = await Cart.findOne({ user: userId })
         .populate({
           path: 'items.productId',
@@ -22,10 +22,14 @@ const cartController = {
       // Calculate totals
       let subtotal = 0;
       const cartItems = cart.items.map(item => {
-        const price = item.productId?.finalPrice || item.productId?.mrp || item.productId?.purchasePrice || 0;
+        // Prefer stored unitPrice on the cart item; otherwise fallback to product prices
+        const price = (typeof item.unitPrice === 'number' && !isNaN(item.unitPrice))
+          ? item.unitPrice
+          : (item.productId?.finalPrice ?? item.productId?.mrp ?? item.productId?.purchasePrice ?? 0);
+
         const itemTotal = price * item.quantity;
         subtotal += itemTotal;
-        
+
         return {
           ...item.toObject(),
           unitPrice: price,
@@ -67,8 +71,21 @@ const cartController = {
         });
       }
 
+      let cart = await Cart.findOne({ user: userId });
+      if (!cart) {
+        cart = new Cart({ user: userId, items: [] });
+      }
+
+      const existingItemIndex = cart.items.findIndex(item =>
+        item.productId.toString() === productId
+      );
+
+      // Calculate desired qty (existing + new) for stock check
+      const existingQty = existingItemIndex > -1 ? cart.items[existingItemIndex].quantity : 0;
+      const desiredQty = existingQty + quantity;
+
       // Check stock if available
-      if (product.stock && product.stock < quantity) {
+      if (product.stock && product.stock < desiredQty) {
         return res.status(400).json({
           success: false,
           message: "Insufficient stock"
@@ -77,35 +94,31 @@ const cartController = {
 
       // Check MOQ
       const minQty = product.MOQ || 1;
-      if (quantity < minQty) {
+      if (quantity < minQty && existingQty === 0) {
+        // if adding first time, enforce MOQ. If updating existing via add, combined qty check above ensures overall quantity.
         return res.status(400).json({
           success: false,
           message: `Minimum order quantity is ${minQty}`
         });
       }
 
-      let cart = await Cart.findOne({ user: userId });
-      
-      if (!cart) {
-        cart = new Cart({ user: userId, items: [] });
-      }
-
-      const existingItemIndex = cart.items.findIndex(item => 
-        item.productId.toString() === productId
-      );
+      // Determine server-authoritative unit price (use finalPrice as sale price)
+      const unitPriceToStore = Number(product.finalPrice ?? product.mrp ?? product.purchasePrice ?? 0);
 
       if (existingItemIndex > -1) {
-        // Update existing item
-        cart.items[existingItemIndex].quantity += quantity;
+        // Update existing item quantity and refresh unitPrice to current product sale price
+        cart.items[existingItemIndex].quantity = cart.items[existingItemIndex].quantity + quantity;
+        cart.items[existingItemIndex].unitPrice = unitPriceToStore;
       } else {
-        // Add new item
-        cart.items.push({ productId, quantity });
+        // Add new item with unitPrice set to product finalPrice (sale price)
+        cart.items.push({ productId, quantity, unitPrice: unitPriceToStore });
       }
 
       await cart.save();
+
       await cart.populate({
         path: 'items.productId',
-        select: 'productname mainImage mrp finalPrice purchasePrice brand'
+        select: 'productname mainImage mrp finalPrice purchasePrice brand stock MOQ'
       });
 
       res.json({
@@ -142,7 +155,7 @@ const cartController = {
         });
       }
 
-      const itemIndex = cart.items.findIndex(item => 
+      const itemIndex = cart.items.findIndex(item =>
         item.productId.toString() === productId
       );
 
@@ -153,7 +166,17 @@ const cartController = {
         });
       }
 
+      // Optional: verify stock for the new quantity
+      const product = await Product.findById(productId);
+      if (product && product.stock && product.stock < quantity) {
+        return res.status(400).json({
+          success: false,
+          message: "Insufficient stock"
+        });
+      }
+
       cart.items[itemIndex].quantity = quantity;
+      // Keep unitPrice as-is (it was set when item was added)
       await cart.save();
 
       res.json({
@@ -183,7 +206,7 @@ const cartController = {
         });
       }
 
-      cart.items = cart.items.filter(item => 
+      cart.items = cart.items.filter(item =>
         item.productId.toString() !== productId
       );
 
