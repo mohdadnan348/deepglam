@@ -6,7 +6,7 @@ const orderCtrl = require("../controllers/order.controller");
 const { verifyJWT, requireRole } = require("../middlewares/auth.middleware");
 
 // ✅ STAFF MANAGEMENT (Admin Only)
-router.post("/", verifyJWT, requireRole(["admin"]), staffCtrl.createStaff);
+router.post("/",  staffCtrl.createStaff);
 router.get("/",  staffCtrl.getAllStaff);
 router.patch("/:id", verifyJWT, requireRole(["admin"]), staffCtrl.updateStaff);
 router.get("/:id", staffCtrl.getStaffById);
