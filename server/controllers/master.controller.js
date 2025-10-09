@@ -397,31 +397,75 @@ exports.validateCoupon = async (req, res) => {
     res.status(500).json({ ok: false, message: 'Failed to validate coupon', error: err.message });
   }
 };
-
-// Mark coupon used — call after payment/order confirmed
+// Mark coupon used – call after payment/order confirmed
 exports.markCouponUsed = async (req, res) => {
   try {
-    const { couponId, userId } = req.body;
-    if (!couponId) return res.status(400).json({ ok: false, message: 'couponId required' });
+    const { couponId, userId, orderId } = req.body;
+    
+    // Validation
+    if (!couponId) {
+      return res.status(400).json({ ok: false, message: 'couponId required' });
+    }
 
-    // Atomic update: only increment if maxUses is null or usedCount < maxUses
-    const coupon = await Coupon.findOneAndUpdate(
-      {
-        _id: mongoose.Types.ObjectId(couponId),
-        $or: [{ maxUses: null }, { $expr: { $lt: ['$usedCount', '$maxUses'] } }],
-      },
-      {
-        $inc: { usedCount: 1 },
-        ...(userId ? { $addToSet: { usedBy: mongoose.Types.ObjectId(userId) } } : {}),
-      },
+    console.log('📌 Marking coupon used:', { couponId, userId, orderId });
+
+    // Validate ObjectId format
+    if (!mongoose.Types.ObjectId.isValid(couponId)) {
+      return res.status(400).json({ ok: false, message: 'Invalid couponId format' });
+    }
+
+    // Find coupon first
+    const coupon = await Coupon.findById(couponId);
+    
+    if (!coupon) {
+      return res.status(404).json({ ok: false, message: 'Coupon not found' });
+    }
+
+    // Check if already at max uses
+    if (coupon.maxUses != null && coupon.usedCount >= coupon.maxUses) {
+      return res.status(400).json({ ok: false, message: 'Coupon usage limit reached' });
+    }
+
+    // Prepare update
+    const updateObj = {
+      $inc: { usedCount: 1 }
+    };
+
+    // Add userId to usedBy array if provided (and valid)
+    if (userId && mongoose.Types.ObjectId.isValid(userId)) {
+      updateObj.$addToSet = { usedBy: userId }; // Don't need to wrap in ObjectId anymore
+    }
+
+    // Update coupon
+    const updatedCoupon = await Coupon.findByIdAndUpdate(
+      couponId,
+      updateObj,
       { new: true }
     );
 
-    if (!coupon) return res.status(400).json({ ok: false, message: 'Coupon not found or usage limit reached' });
+    if (!updatedCoupon) {
+      return res.status(404).json({ ok: false, message: 'Failed to update coupon' });
+    }
 
-    return res.json({ ok: true, message: 'Coupon usage recorded', coupon });
+    console.log('✅ Coupon marked as used successfully');
+    
+    return res.json({ 
+      ok: true, 
+      message: 'Coupon usage recorded', 
+      data: {
+        couponId: updatedCoupon._id,
+        code: updatedCoupon.code,
+        usedCount: updatedCoupon.usedCount,
+        maxUses: updatedCoupon.maxUses
+      }
+    });
+
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ ok: false, message: 'Failed to mark coupon used', error: err.message });
+    console.error('❌ markCouponUsed error:', err);
+    res.status(500).json({ 
+      ok: false, 
+      message: 'Failed to mark coupon used', 
+      error: err.message 
+    });
   }
 };
