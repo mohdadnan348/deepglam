@@ -10,173 +10,8 @@ const toInt = (v, fallback = 0) => {
   const n = parseInt(v, 10);
   return Number.isNaN(n) ? fallback : n;
 };
+// controllers/order.controller.js - FIXED createOrder with GST
 
-// ============================
-// 1. BUYER FUNCTIONS
-// ============================
-/*
-// ✅ CREATE ORDER (Buyer only)
-exports.createOrder = async (req, res) => {
-  try {
-    const buyerUserId = req.user._id;
-
-    const {
-      products = [],
-      deliveryAddress,
-      notes = "",
-      discountPaise = 0
-    } = req.body;
-
-    if (!products || products.length === 0) {
-      return res.status(400).json({
-        ok: false,
-        message: "Products are required to create order"
-      });
-    }
-
-    // Get buyer profile
-    const buyerProfile = await BuyerProfile.findOne({ userId: buyerUserId })
-      .populate('staffUserId', 'name phone email');
-
-    if (!buyerProfile) {
-      return res.status(404).json({
-        ok: false,
-        message: "Buyer profile not found"
-      });
-    }
-
-    // Fetch product details with seller info
-    const productIds = products.map(item => item.productId);
-    const productDetails = await Product.find({ _id: { $in: productIds } })
-      .populate('userId', 'name email businessName phone');
-
-    if (productDetails.length !== productIds.length) {
-      return res.status(400).json({
-        ok: false,
-        message: "Some products not found in database"
-      });
-    }
-
-    // Build order products
-    let subtotalPaise = 0;
-    const orderProducts = products.map(item => {
-      const product = productDetails.find(p => p._id.toString() === item.productId);
-      if (!product) throw new Error(`Product not found: ${item.productId}`);
-
-      const quantity = Math.max(1, Number(item.quantity) || 1);
-
-      let pricePerUnitPaise;
-      if (product.salePrice) {
-        pricePerUnitPaise = Math.round(product.salePrice * 100);
-      } else if (product.price) {
-        pricePerUnitPaise = Math.round(product.price * 100);
-      } else {
-        pricePerUnitPaise = 0;
-      }
-
-      const totalPaise = quantity * pricePerUnitPaise;
-      subtotalPaise += totalPaise;
-
-      return {
-        product: product._id,
-        productName: product.productName,
-        sellerUserId: product.userId ? product.userId._id : null,
-        brand: product.brand || "Unknown",
-        quantity,
-        pricePerUnitPaise,
-        totalPaise
-      };
-    });
-
-    // Auto-derive delivery address
-    let finalDeliveryAddress;
-
-    if (deliveryAddress && deliveryAddress.shopName && deliveryAddress.fullAddress) {
-      finalDeliveryAddress = {
-        shopName: deliveryAddress.shopName,
-        fullAddress: deliveryAddress.fullAddress,
-        city: deliveryAddress.city || buyerProfile.shopAddress.city,
-        state: deliveryAddress.state || buyerProfile.shopAddress.state,
-        postalCode: deliveryAddress.postalCode || buyerProfile.shopAddress.postalCode,
-        country: deliveryAddress.country || buyerProfile.shopAddress.country || "India"
-      };
-    } else {
-      finalDeliveryAddress = {
-        shopName: buyerProfile.shopName,
-        fullAddress: `${buyerProfile.shopAddress.line1}${buyerProfile.shopAddress.line2 ? ', ' + buyerProfile.shopAddress.line2 : ''}, ${buyerProfile.shopAddress.city}, ${buyerProfile.shopAddress.state}`,
-        city: buyerProfile.shopAddress.city,
-        state: buyerProfile.shopAddress.state,
-        postalCode: buyerProfile.shopAddress.postalCode,
-        country: buyerProfile.shopAddress.country || "India"
-      };
-    }
-
-    // Calculate totals
-    const taxRate = 0.18;
-    const discountedSubtotal = Math.max(0, subtotalPaise - discountPaise);
-    const taxPaise = Math.round(discountedSubtotal * taxRate);
-    const finalAmountPaise = discountedSubtotal + taxPaise;
-
-    // Generate order number
-    const orderNumber = `ORD-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
-
-    // Create order
-    const order = new Order({
-      buyerUserId,
-      staffUserId: buyerProfile.staffUserId._id || buyerProfile.staffUserId,
-      employeeCode: buyerProfile.employeeCode,
-      orderNumber,
-      deliveryAddress: finalDeliveryAddress,
-      products: orderProducts,
-      subtotalPaise,
-      discountPaise,
-      taxPaise,
-      finalAmountPaise,
-      paymentStatus: "unpaid",
-      status: "confirmed",
-      notes: notes.trim()
-    });
-
-    // Calculate brand breakdown
-    if (typeof order.calculateBrandBreakdown === "function") {
-      order.calculateBrandBreakdown();
-    }
-
-    await order.save();
-
-    // Populate response data
-    const populatedOrder = await Order.findById(order._id)
-      .populate('buyerUserId', 'name phone email')
-      .populate('staffUserId', 'name phone email')
-      .populate({
-        path: 'products.product',
-        select: 'productName brand mainImage'
-      });
-
-    res.status(201).json({
-      ok: true,
-      message: "Order created successfully",
-      data: {
-        ...populatedOrder.toObject(),
-        subtotal: (populatedOrder.subtotalPaise / 100).toFixed(2),
-        discount: (populatedOrder.discountPaise / 100).toFixed(2),
-        tax: (populatedOrder.taxPaise / 100).toFixed(2),
-        finalAmount: (populatedOrder.finalAmountPaise / 100).toFixed(2)
-      }
-    });
-
-  } catch (error) {
-    console.error("Create order error:", error);
-    res.status(500).json({
-      ok: false,
-      message: "Failed to create order",
-      error: error.message
-    });
-  }
-};
-*/
-
-// CREATE ORDER (Buyer only) - REPLACE existing createOrder with this
 exports.createOrder = async (req, res) => {
   try {
     const buyerUserId = req.user._id;
@@ -228,7 +63,7 @@ exports.createOrder = async (req, res) => {
     // Tolerance in paise for small rounding diffs (1 paise)
     const EPSILON_PAISE = 1;
 
-    // Build order products using client unitPricePaise if valid, else DB price
+    // ✅ BUILD ORDER PRODUCTS WITH GST DATA
     let subtotalPaise = 0;
     const orderProducts = products.map(item => {
       const product = productDetails.find(p => p._id.toString() === item.productId);
@@ -237,10 +72,11 @@ exports.createOrder = async (req, res) => {
       const quantity = Math.max(1, Number(item.quantity) || 1);
 
       // DB authoritative price (prefer salePrice -> price -> purchasePrice)
-      const dbUnitPaise = dbPriceToPaise(product.salePrice ?? product.finalPrice ?? product.price ?? product.purchasePrice ?? 0);
+      const dbUnitPaise = dbPriceToPaise(
+        product.salePrice ?? product.finalPrice ?? product.price ?? product.purchasePrice ?? 0
+      );
 
-      // Client provided price (expect units in paise if client follows new contract)
-      // Accept either `unitPricePaise` (preferred) or `unitPrice` (rupees) for compatibility
+      // Client provided price (expect units in paise)
       let clientUnitPaise = null;
       if (typeof item.unitPricePaise !== "undefined" && item.unitPricePaise !== null) {
         const parsed = Number(item.unitPricePaise);
@@ -254,12 +90,10 @@ exports.createOrder = async (req, res) => {
       let pricePerUnitPaise;
       if (clientUnitPaise !== null) {
         if (dbUnitPaise > 0) {
-          // Accept client price only if it matches DB price within tolerance
           if (Math.abs(clientUnitPaise - dbUnitPaise) <= EPSILON_PAISE) {
             pricePerUnitPaise = clientUnitPaise;
           } else {
-            // mismatch -> prefer DB price (log for investigation)
-            console.warn('Client price mismatch for createOrder - using DB price', {
+            console.warn('Client price mismatch - using DB price', {
               productId: product._id.toString(),
               clientUnitPaise,
               dbUnitPaise,
@@ -268,20 +102,18 @@ exports.createOrder = async (req, res) => {
             pricePerUnitPaise = dbUnitPaise;
           }
         } else {
-          // DB has no price -> accept client price (after basic validation)
           pricePerUnitPaise = clientUnitPaise;
         }
       } else {
-        // no client price -> use DB
         pricePerUnitPaise = dbUnitPaise;
       }
 
-      // Ensure non-negative
       pricePerUnitPaise = Math.max(0, Number(pricePerUnitPaise || 0));
 
       const totalPaise = quantity * pricePerUnitPaise;
       subtotalPaise += totalPaise;
 
+      // ✅ CRITICAL FIX: Copy GST data from Product model
       return {
         product: product._id,
         productName: product.productName,
@@ -289,7 +121,15 @@ exports.createOrder = async (req, res) => {
         brand: product.brand || "Unknown",
         quantity,
         pricePerUnitPaise,
-        totalPaise
+        totalPaise,
+        
+        // ✅ ADD GST FIELDS FROM PRODUCT
+        purchasePricePerUnitPaise: dbPriceToPaise(product.purchasePrice || 0),
+        hsnCode: product.hsnCode || product.hsn || '6203',
+        gstPercentage: product.gstPercentage || product.gst || 0,
+        gstType: product.gstType || 'exclusive',
+        gstAmount: product.gstAmount || 0,
+        gstAmountPerUnitPaise: dbPriceToPaise(product.gstAmount || 0)
       };
     });
 
@@ -316,11 +156,28 @@ exports.createOrder = async (req, res) => {
       };
     }
 
-    // Calculate totals (use proper GST rate if your products have per-product GST, adapt accordingly)
-    // Here we infer 18% as earlier behaviour; you may want to use product-level gst if available
-    const taxRate = 0.18;
+    // Calculate totals with proper GST
     const discountedSubtotal = Math.max(0, subtotalPaise - Number(discountPaise || 0));
-    const taxPaise = Math.round(discountedSubtotal * taxRate);
+    
+    // ✅ Calculate GST properly from product-level GST
+    let totalGstPaise = 0;
+    orderProducts.forEach(p => {
+      const gstPct = Number(p.gstPercentage || 0);
+      const gstType = p.gstType || 'exclusive';
+      
+      if (gstType === 'exclusive') {
+        // GST is additional
+        const lineGst = Math.round((p.totalPaise * gstPct) / 100);
+        totalGstPaise += lineGst;
+      } else {
+        // GST is included in price
+        const basePrice = Math.round((p.totalPaise * 100) / (100 + gstPct));
+        const lineGst = p.totalPaise - basePrice;
+        totalGstPaise += lineGst;
+      }
+    });
+    
+    const taxPaise = totalGstPaise;
     const finalAmountPaise = discountedSubtotal + taxPaise;
 
     // Generate order number
@@ -356,7 +213,7 @@ exports.createOrder = async (req, res) => {
       .populate('staffUserId', 'name phone email')
       .populate({
         path: 'products.product',
-        select: 'productName brand mainImage'
+        select: 'productName brand mainImage purchasePrice salePrice price gstPercentage gstType gstAmount hsnCode'
       });
 
     res.status(201).json({
