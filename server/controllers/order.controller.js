@@ -4,14 +4,17 @@ const Order = require("../models/order.model");
 const Product = require("../models/product.model");
 const BuyerProfile = require("../models/buyer.model");
 const User = require("../models/user.model");
-const Seller = require("../models/seller.model");
 
 const toInt = (v, fallback = 0) => {
   const n = parseInt(v, 10);
   return Number.isNaN(n) ? fallback : n;
 };
-// controllers/order.controller.js - FIXED createOrder with GST
 
+// ============================
+// 1. BUYER FUNCTIONS
+// ============================
+
+// ✅ CREATE ORDER (Buyer only)
 exports.createOrder = async (req, res) => {
   try {
     const buyerUserId = req.user._id;
@@ -53,67 +56,26 @@ exports.createOrder = async (req, res) => {
       });
     }
 
-    // Helper: convert DB price (rupees) -> paise
-    const dbPriceToPaise = (p) => {
-      const n = Number(p || 0);
-      if (Number.isNaN(n)) return 0;
-      return Math.round(n * 100);
-    };
-
-    // Tolerance in paise for small rounding diffs (1 paise)
-    const EPSILON_PAISE = 1;
-
-    // ✅ BUILD ORDER PRODUCTS WITH GST DATA
+    // Build order products
     let subtotalPaise = 0;
     const orderProducts = products.map(item => {
       const product = productDetails.find(p => p._id.toString() === item.productId);
       if (!product) throw new Error(`Product not found: ${item.productId}`);
 
       const quantity = Math.max(1, Number(item.quantity) || 1);
-
-      // DB authoritative price (prefer salePrice -> price -> purchasePrice)
-      const dbUnitPaise = dbPriceToPaise(
-        product.salePrice ?? product.finalPrice ?? product.price ?? product.purchasePrice ?? 0
-      );
-
-      // Client provided price (expect units in paise)
-      let clientUnitPaise = null;
-      if (typeof item.unitPricePaise !== "undefined" && item.unitPricePaise !== null) {
-        const parsed = Number(item.unitPricePaise);
-        if (!Number.isNaN(parsed) && parsed >= 0) clientUnitPaise = Math.round(parsed);
-      } else if (typeof item.unitPrice !== "undefined" && item.unitPrice !== null) {
-        const parsedR = Number(item.unitPrice);
-        if (!Number.isNaN(parsedR) && parsedR >= 0) clientUnitPaise = Math.round(parsedR * 100);
-      }
-
-      // Decide final unit price to use (paise)
+      
       let pricePerUnitPaise;
-      if (clientUnitPaise !== null) {
-        if (dbUnitPaise > 0) {
-          if (Math.abs(clientUnitPaise - dbUnitPaise) <= EPSILON_PAISE) {
-            pricePerUnitPaise = clientUnitPaise;
-          } else {
-            console.warn('Client price mismatch - using DB price', {
-              productId: product._id.toString(),
-              clientUnitPaise,
-              dbUnitPaise,
-              buyerUserId
-            });
-            pricePerUnitPaise = dbUnitPaise;
-          }
-        } else {
-          pricePerUnitPaise = clientUnitPaise;
-        }
+      if (product.salePrice) {
+        pricePerUnitPaise = Math.round(product.salePrice * 100);
+      } else if (product.price) {
+        pricePerUnitPaise = Math.round(product.price * 100);
       } else {
-        pricePerUnitPaise = dbUnitPaise;
+        pricePerUnitPaise = 0;
       }
-
-      pricePerUnitPaise = Math.max(0, Number(pricePerUnitPaise || 0));
-
+      
       const totalPaise = quantity * pricePerUnitPaise;
       subtotalPaise += totalPaise;
 
-      // ✅ CRITICAL FIX: Copy GST data from Product model
       return {
         product: product._id,
         productName: product.productName,
@@ -121,21 +83,13 @@ exports.createOrder = async (req, res) => {
         brand: product.brand || "Unknown",
         quantity,
         pricePerUnitPaise,
-        totalPaise,
-        
-        // ✅ ADD GST FIELDS FROM PRODUCT
-        purchasePricePerUnitPaise: dbPriceToPaise(product.purchasePrice || 0),
-        hsnCode: product.hsnCode || product.hsn || '6203',
-        gstPercentage: product.gstPercentage || product.gst || 0,
-        gstType: product.gstType || 'exclusive',
-        gstAmount: product.gstAmount || 0,
-        gstAmountPerUnitPaise: dbPriceToPaise(product.gstAmount || 0)
+        totalPaise
       };
     });
 
     // Auto-derive delivery address
     let finalDeliveryAddress;
-
+    
     if (deliveryAddress && deliveryAddress.shopName && deliveryAddress.fullAddress) {
       finalDeliveryAddress = {
         shopName: deliveryAddress.shopName,
@@ -156,28 +110,10 @@ exports.createOrder = async (req, res) => {
       };
     }
 
-    // Calculate totals with proper GST
-    const discountedSubtotal = Math.max(0, subtotalPaise - Number(discountPaise || 0));
-    
-    // ✅ Calculate GST properly from product-level GST
-    let totalGstPaise = 0;
-    orderProducts.forEach(p => {
-      const gstPct = Number(p.gstPercentage || 0);
-      const gstType = p.gstType || 'exclusive';
-      
-      if (gstType === 'exclusive') {
-        // GST is additional
-        const lineGst = Math.round((p.totalPaise * gstPct) / 100);
-        totalGstPaise += lineGst;
-      } else {
-        // GST is included in price
-        const basePrice = Math.round((p.totalPaise * 100) / (100 + gstPct));
-        const lineGst = p.totalPaise - basePrice;
-        totalGstPaise += lineGst;
-      }
-    });
-    
-    const taxPaise = totalGstPaise;
+    // Calculate totals
+    const taxRate = 0.18;
+    const discountedSubtotal = Math.max(0, subtotalPaise - discountPaise);
+    const taxPaise = Math.round(discountedSubtotal * taxRate);
     const finalAmountPaise = discountedSubtotal + taxPaise;
 
     // Generate order number
@@ -213,7 +149,7 @@ exports.createOrder = async (req, res) => {
       .populate('staffUserId', 'name phone email')
       .populate({
         path: 'products.product',
-        select: 'productName brand mainImage purchasePrice salePrice price gstPercentage gstType gstAmount hsnCode'
+        select: 'productName brand mainImage'
       });
 
     res.status(201).json({
@@ -245,9 +181,9 @@ exports.createOrder = async (req, res) => {
 // ✅ GET ORDERS (Role-based filtering)
 exports.getOrders = async (req, res) => {
   try {
-    const userId = req.user._id;
+    const userId = req.user._id; 
     const userRole = req.user.role;
-
+    
     const {
       page = 1,
       limit = 20,
@@ -275,7 +211,7 @@ exports.getOrders = async (req, res) => {
 
     if (status) filter.status = status;
     if (paymentStatus) filter.paymentStatus = paymentStatus;
-
+    
     if (dateFrom || dateTo) {
       filter.createdAt = {};
       if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
@@ -302,7 +238,7 @@ exports.getOrders = async (req, res) => {
     if (userRole === "seller") {
       filteredOrders = orders.map(order => ({
         ...order,
-        products: order.products.filter(product =>
+        products: order.products.filter(product => 
           product.sellerUserId?.toString() === userId.toString()
         ),
         // Calculate seller's portion
@@ -334,27 +270,19 @@ exports.getOrders = async (req, res) => {
 };
 
 // ✅ GET ORDER BY ID
-
-
-// controllers/order.controller.js
-// ✅ GET ORDER BY ID (UPDATED WITH PRODUCT POPULATE)
 exports.getOrderById = async (req, res) => {
   try {
     const { orderId } = req.params;
     const userId = req.user._id;
     const userRole = req.user.role;
 
-    // ✅ Step 1: Get order with product details populated
-    let order = await Order.findById(orderId)
+    const order = await Order.findById(orderId)
       .populate('buyerUserId', 'name phone email')
       .populate('staffUserId', 'name phone email')
-      .populate('products.sellerUserId', 'name phone email role')
-      .populate('brandBreakdown.sellerUserId', 'name phone email role')
       .populate({
         path: 'products.product',
-        select: 'productName brand mainImage purchasePrice salePrice price' // ✅ Include purchasePrice
-      })
-      .lean();
+        select: 'productName brand mainImage'
+      });
 
     if (!order) {
       return res.status(404).json({
@@ -374,7 +302,7 @@ exports.getOrderById = async (req, res) => {
       hasAccess = order.staffUserId._id.toString() === userId.toString();
     } else if (userRole === "seller") {
       hasAccess = order.products.some(product => 
-        product.sellerUserId?._id?.toString() === userId.toString()
+        product.sellerUserId?.toString() === userId.toString()
       );
     }
 
@@ -382,73 +310,6 @@ exports.getOrderById = async (req, res) => {
       return res.status(403).json({
         ok: false,
         message: "Access denied - this order doesn't belong to you"
-      });
-    }
-
-    // ✅ Step 2: Get unique seller user IDs
-    const sellerUserIds = new Set();
-    
-    order.products.forEach(p => {
-      if (p.sellerUserId?._id) {
-        sellerUserIds.add(p.sellerUserId._id.toString());
-      }
-    });
-    
-    if (order.brandBreakdown) {
-      order.brandBreakdown.forEach(b => {
-        if (b.sellerUserId?._id) {
-          sellerUserIds.add(b.sellerUserId._id.toString());
-        }
-      });
-    }
-
-    // ✅ Step 3: Fetch Seller model data
-    const Seller = require("../models/seller.model");
-    
-    const sellers = await Seller.find({ 
-      userId: { $in: Array.from(sellerUserIds) } 
-    }).lean();
-
-    // ✅ Step 4: Create seller map
-    const sellerMap = {};
-    sellers.forEach(seller => {
-      sellerMap[seller.userId.toString()] = {
-        brandName: seller.brandName,
-        gstNumber: seller.gstNumber,
-        address: seller.fullAddress,
-        bankDetails: seller.payoutBankMasked,
-        isApproved: seller.isApproved,
-        kycVerified: seller.kycVerified
-      };
-    });
-
-    // ✅ Step 5: Attach seller details AND purchase price to products
-    order.products = order.products.map(product => {
-      const sellerId = product.sellerUserId?._id?.toString();
-      const sellerInfo = sellerMap[sellerId];
-      
-      // ✅ Get purchase price from populated product
-      const purchasePricePerUnitPaise = product.product?.purchasePrice 
-        ? Math.round(product.product.purchasePrice * 100)
-        : (product.purchasePricePerUnitPaise || product.pricePerUnitPaise); // Fallback
-      
-      return {
-        ...product,
-        purchasePricePerUnitPaise, // ✅ Add purchase price dynamically
-        sellerDetails: sellerInfo || null
-      };
-    });
-
-    // ✅ Step 6: Attach seller details to brand breakdown
-    if (order.brandBreakdown) {
-      order.brandBreakdown = order.brandBreakdown.map(breakdown => {
-        const sellerId = breakdown.sellerUserId?._id?.toString();
-        const sellerInfo = sellerMap[sellerId];
-        
-        return {
-          ...breakdown,
-          sellerDetails: sellerInfo || null
-        };
       });
     }
 
@@ -467,8 +328,6 @@ exports.getOrderById = async (req, res) => {
   }
 };
 
-
-
 // ============================
 // 3. SELLER FUNCTIONS
 // ============================
@@ -478,14 +337,14 @@ exports.getSellerDashboard = async (req, res) => {
   try {
     const sellerId = req.user._id;
     const { period = "30" } = req.query;
-
+    
     if (req.user.role !== "seller") {
       return res.status(403).json({
         ok: false,
         message: "Access denied - sellers only"
       });
     }
-
+    
     const dateFrom = new Date();
     dateFrom.setDate(dateFrom.getDate() - parseInt(period));
 
@@ -548,7 +407,7 @@ exports.getSellerDashboard = async (req, res) => {
           buyer: order.buyerUserId,
           status: order.status,
           createdAt: order.createdAt,
-          sellerProducts: order.products.filter(p =>
+          sellerProducts: order.products.filter(p => 
             p.sellerUserId.toString() === sellerId.toString()
           ).length
         }))
@@ -569,15 +428,15 @@ exports.getSellerDashboard = async (req, res) => {
 exports.getSellerEarnings = async (req, res) => {
   try {
     const sellerId = req.user._id;
-
+    
     if (req.user.role !== "seller") {
       return res.status(403).json({
         ok: false,
         message: "Access denied - sellers only"
       });
     }
-
-    const {
+    
+    const { 
       period = "monthly",
       year = new Date().getFullYear(),
       month = new Date().getMonth() + 1
@@ -641,16 +500,16 @@ exports.getSellerEarnings = async (req, res) => {
 exports.getStaffDashboard = async (req, res) => {
   try {
     const staffId = req.user._id;
-
+    
     if (req.user.role !== "staff") {
       return res.status(403).json({
         ok: false,
         message: "Access denied - staff only"
       });
     }
-
+    
     const { period = "30" } = req.query;
-
+    
     const dateFrom = new Date();
     dateFrom.setDate(dateFrom.getDate() - parseInt(period));
 
@@ -691,23 +550,19 @@ exports.getStaffDashboard = async (req, res) => {
         .limit(5),
       Order.aggregate([
         { $match: { staffUserId: staffId } },
-        {
-          $group: {
-            _id: "$buyerUserId",
-            totalOrders: { $sum: 1 },
-            totalAmount: { $sum: "$finalAmountPaise" }
-          }
-        },
+        { $group: { 
+          _id: "$buyerUserId", 
+          totalOrders: { $sum: 1 },
+          totalAmount: { $sum: "$finalAmountPaise" }
+        }},
         { $sort: { totalAmount: -1 } },
         { $limit: 5 },
-        {
-          $lookup: {
-            from: "users",
-            localField: "_id",
-            foreignField: "_id",
-            as: "buyer"
-          }
-        }
+        { $lookup: {
+          from: "users",
+          localField: "_id",
+          foreignField: "_id",
+          as: "buyer"
+        }}
       ])
     ]);
 
@@ -749,14 +604,14 @@ exports.getStaffDashboard = async (req, res) => {
 exports.getStaffBuyers = async (req, res) => {
   try {
     const staffId = req.user._id;
-
+    
     if (req.user.role !== "staff") {
       return res.status(403).json({
         ok: false,
         message: "Access denied - staff only"
       });
     }
-
+    
     const buyers = await BuyerProfile.find({ staffUserId: staffId })
       .populate('userId', 'name phone email')
       .select('shopName shopAddress approvalStatus kycVerified creditLimitPaise currentDuePaise')
@@ -767,8 +622,8 @@ exports.getStaffBuyers = async (req, res) => {
       buyers.map(async (buyer) => {
         const [totalOrders, pendingOrders, totalSpent] = await Promise.all([
           Order.countDocuments({ buyerUserId: buyer.userId._id }),
-          Order.countDocuments({
-            buyerUserId: buyer.userId._id,
+          Order.countDocuments({ 
+            buyerUserId: buyer.userId._id, 
             status: { $in: ["confirmed", "processing", "packed"] }
           }),
           Order.aggregate([
@@ -818,7 +673,7 @@ exports.updateOrderStatus = async (req, res) => {
     const userRole = req.user.role;
 
     const validStatuses = [
-      "confirmed", "processing", "packed",
+      "confirmed", "processing", "packed", 
       "shipped", "delivered", "cancelled"
     ];
 
@@ -840,7 +695,7 @@ exports.updateOrderStatus = async (req, res) => {
     // Role-based authorization
     let canUpdate = false;
     let allowedStatuses = [];
-
+    
     if (userRole === "admin") {
       canUpdate = true;
       allowedStatuses = validStatuses;
@@ -855,8 +710,8 @@ exports.updateOrderStatus = async (req, res) => {
       allowedStatuses = ["processing", "packed"];
     } else if (userRole === "buyer") {
       canUpdate = (
-        order.buyerUserId.toString() === userId.toString() &&
-        status === "cancelled" &&
+        order.buyerUserId.toString() === userId.toString() && 
+        status === "cancelled" && 
         !["shipped", "delivered"].includes(order.status)
       );
       allowedStatuses = ["cancelled"];
@@ -896,7 +751,7 @@ exports.updateOrderStatus = async (req, res) => {
     // Update order status
     order.status = status;
     if (!order.statusLogs) order.statusLogs = [];
-
+    
     order.statusLogs.push({
       timestamp: new Date(),
       actionBy: userId,
@@ -967,7 +822,7 @@ exports.updatePaymentStatus = async (req, res) => {
 
     // Update payment status
     order.paidAmountPaise = newPaidAmount;
-
+    
     if (newPaidAmount >= order.finalAmountPaise) {
       order.paymentStatus = "paid";
     } else if (newPaidAmount > 0) {
@@ -1026,28 +881,28 @@ exports.bulkUpdateOrders = async (req, res) => {
     }
 
     const results = [];
-
+    
     for (const orderId of orderIds) {
       try {
         const order = await Order.findById(orderId);
         if (order) {
           // Staff can only update their buyers' orders
-          if (userRole === "staff" &&
-            order.staffUserId.toString() !== userId.toString()) {
+          if (userRole === "staff" && 
+              order.staffUserId.toString() !== userId.toString()) {
             results.push({ orderId, success: false, error: "Access denied" });
             continue;
           }
 
           order.status = status;
           if (!order.statusLogs) order.statusLogs = [];
-
+          
           order.statusLogs.push({
             timestamp: new Date(),
             actionBy: userId,
             action: `BULK_${status.toUpperCase()}`,
             note
           });
-
+          
           await order.save();
           results.push({ orderId, success: true });
         } else {
@@ -1104,10 +959,10 @@ exports.bulkDispatchOrders = async (req, res) => {
         const order = await Order.findOne(filter);
 
         if (!order) {
-          results.push({
-            orderId,
-            success: false,
-            error: "Order not found or not ready for dispatch"
+          results.push({ 
+            orderId, 
+            success: false, 
+            error: "Order not found or not ready for dispatch" 
           });
           continue;
         }
@@ -1161,12 +1016,10 @@ exports.bulkDispatchOrders = async (req, res) => {
 // ============================
 
 // ✅ GET BRAND-WISE BILL
-
-// ✅ GET BRAND-WISE BILL (UPDATED WITH PRODUCT POPULATE)
 exports.getBrandWiseBill = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const { brand, sellerUserId, priceType = "selling" } = req.query;
+    const { brand, sellerUserId } = req.query;
 
     if (!brand || !sellerUserId) {
       return res.status(400).json({
@@ -1175,16 +1028,10 @@ exports.getBrandWiseBill = async (req, res) => {
       });
     }
 
-    // ✅ Populate products with purchasePrice from Product model
     const order = await Order.findById(orderId)
       .populate('buyerUserId', 'name phone email')
-      .populate('products.sellerUserId', 'name email businessName phone role')
-      .populate('brandBreakdown.sellerUserId', 'name email businessName phone role')
-      .populate({
-        path: 'products.product',
-        select: 'productName brand purchasePrice salePrice price' // ✅ Include purchasePrice
-      })
-      .lean();
+      .populate('products.sellerUserId', 'name email businessName')
+      .populate('brandBreakdown.sellerUserId', 'name email businessName');
 
     if (!order) {
       return res.status(404).json({
@@ -1194,13 +1041,13 @@ exports.getBrandWiseBill = async (req, res) => {
     }
 
     // Filter for specific brand/seller
-    const brandProducts = order.products.filter(product =>
-      product.brand === brand &&
+    const brandProducts = order.products.filter(product => 
+      product.brand === brand && 
       product.sellerUserId._id.toString() === sellerUserId
     );
 
     const brandBill = order.brandBreakdown.find(breakdown =>
-      breakdown.brand === brand &&
+      breakdown.brand === brand && 
       breakdown.sellerUserId._id.toString() === sellerUserId
     );
 
@@ -1211,84 +1058,29 @@ exports.getBrandWiseBill = async (req, res) => {
       });
     }
 
-    // ✅ Fetch seller details from Seller model
-    const Seller = require("../models/seller.model");
-    const sellerInfo = await Seller.findOne({ userId: sellerUserId }).lean();
-
-    // ✅ Calculate amounts based on price type with product populate
-    let subtotal = 0;
-    const productsWithPricing = brandProducts.map(product => {
-      let pricePerUnit, total;
-      
-      // ✅ Get purchase price from populated product OR order field
-      const purchasePricePerUnitPaise = product.product?.purchasePrice 
-        ? Math.round(product.product.purchasePrice * 100)
-        : (product.purchasePricePerUnitPaise || product.pricePerUnitPaise);
-
-      if (priceType === "purchase") {
-        pricePerUnit = purchasePricePerUnitPaise;
-        total = pricePerUnit * product.quantity;
-      } else {
-        pricePerUnit = product.pricePerUnitPaise;
-        total = product.totalPaise;
-      }
-
-      subtotal += total;
-
-      return {
-        productName: product.productName,
-        brand: product.brand,
-        quantity: product.quantity,
-        pricePerUnitPaise: pricePerUnit,
-        totalPaise: total,
-        // ✅ Include both prices for reference
-        sellingPricePaise: product.pricePerUnitPaise,
-        purchasePricePaise: purchasePricePerUnitPaise
-      };
-    });
-
-    const tax = Math.round(subtotal * 0.18);
-    const total = subtotal + tax;
-
     // Generate bill data
     const billData = {
       orderNumber: order.orderNumber,
-      billNumber: `BILL-${order.orderNumber}-${brand.toUpperCase()}-${priceType.toUpperCase()}`,
-      date: new Date().toLocaleDateString("en-IN"),
-      priceType: priceType,
-
+      billNumber: `BILL-${order.orderNumber}-${brand.toUpperCase()}`,
       buyer: {
         name: order.buyerUserId.name,
         phone: order.buyerUserId.phone,
         email: order.buyerUserId.email,
         address: order.deliveryAddress
       },
-
-      // ✅ Seller details with address
-      sellerDetails: sellerInfo ? {
-        brandName: sellerInfo.brandName,
-        gstNumber: sellerInfo.gstNumber,
-        address: sellerInfo.fullAddress,
-        bankDetails: sellerInfo.payoutBankMasked,
-        contact: {
-          name: brandBill.sellerUserId.name,
-          phone: brandBill.sellerUserId.phone,
-          email: brandBill.sellerUserId.email
-        }
-      } : null,
-
+      seller: brandBill.sellerUserId,
       brand: brand,
-      products: productsWithPricing,
-
+      products: brandProducts.map(product => ({
+        name: product.productName,
+        quantity: product.quantity,
+        pricePerUnit: Math.round(product.pricePerUnitPaise / 100),
+        total: Math.round(product.totalPaise / 100)
+      })),
       amounts: {
-        subtotalPaise: subtotal,
-        taxPaise: tax,
-        totalPaise: total,
-        subtotal: (subtotal / 100).toFixed(2),
-        tax: (tax / 100).toFixed(2),
-        total: (total / 100).toFixed(2)
+        subtotal: Math.round(brandBill.subtotalPaise / 100),
+        tax: Math.round(brandBill.taxPaise / 100),
+        total: Math.round(brandBill.totalPaise / 100)
       },
-
       dates: {
         orderDate: order.createdAt,
         billDate: new Date()
@@ -1310,8 +1102,6 @@ exports.getBrandWiseBill = async (req, res) => {
     });
   }
 };
-
-
 
 // ✅ CANCEL ORDER
 exports.cancelOrder = async (req, res) => {
@@ -1355,14 +1145,14 @@ exports.cancelOrder = async (req, res) => {
     // Cancel order
     order.status = "cancelled";
     if (!order.statusLogs) order.statusLogs = [];
-
+    
     order.statusLogs.push({
       timestamp: new Date(),
       actionBy: userId,
       action: "CANCELLED",
       note: reason || "Order cancelled by user"
     });
-
+    
     await order.save();
 
     res.json({

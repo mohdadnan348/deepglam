@@ -1,10 +1,8 @@
-// models/order.model.js - UPDATED WITH GST FIELDS
+// models/order.model.js
 const mongoose = require("mongoose");
 
 const int = v => (v == null ? v : Math.round(Number(v) || 0));
-const float = v => (v == null ? v : parseFloat(Number(v) || 0));
 
-// ✅ UPDATED LineItemSchema with GST fields
 const LineItemSchema = new mongoose.Schema({
   product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
   productName: { type: String, required: true },
@@ -13,22 +11,9 @@ const LineItemSchema = new mongoose.Schema({
   sellerUserId: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   brand: { type: String, required: true },
   
-  // ✅ Quantity and pricing
   quantity: { type: Number, set: int, default: 1 },
   pricePerUnitPaise: { type: Number, set: int },
-  totalPaise: { type: Number, set: int },
-  
-  // ✅ CRITICAL: GST & Purchase Price Fields
-  purchasePricePerUnitPaise: { type: Number, set: int, default: 0 },
-  hsnCode: { type: String, default: '6203' },
-  gstPercentage: { type: Number, set: float, default: 0 },
-  gstType: { 
-    type: String, 
-    enum: ['exclusive', 'inclusive'], 
-    default: 'exclusive' 
-  },
-  gstAmount: { type: Number, set: float, default: 0 },
-  gstAmountPerUnitPaise: { type: Number, set: int, default: 0 }
+  totalPaise: { type: Number, set: int }
 }, { _id: false });
 
 const orderSchema = new mongoose.Schema({
@@ -65,11 +50,10 @@ const orderSchema = new mongoose.Schema({
     fullAddress: { type: String, required: true },
     city: { type: String, required: true },
     state: { type: String, required: true },
-    postalCode: { type: String, required: true },
-    country: { type: String, default: "India" }
+    postalCode: { type: String, required: true }
   },
 
-  // ✅ Products with seller & brand info + GST
+  // ✅ Products with seller & brand info
   products: [LineItemSchema],
 
   // ✅ Brand-wise breakdown (for billing)
@@ -97,44 +81,22 @@ const orderSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ["confirmed", "processing", "packed", "shipped", "delivered", "cancelled", "returned"],
+    enum: ["confirmed", "processing", "shipped", "delivered", "cancelled"],
     default: "confirmed",
     index: true
   },
-  
-  // ✅ Dispatch info
-  dispatch: {
-    courier: String,
-    awb: String,
-    note: String,
-    dispatchedAt: Date,
-    dispatchedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" }
-  },
-  
-  // ✅ Status logs
-  statusLogs: [{
-    timestamp: { type: Date, default: Date.now },
-    actionBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    action: String,
-    note: String
-  }],
-  
   notes: { type: String }
 }, { 
   timestamps: true,
-  toJSON: { virtuals: true },
-  toObject: { virtuals: true }
+  index: [
+    { buyerUserId: 1, createdAt: -1 },
+    { staffUserId: 1, createdAt: -1 },
+    { "products.sellerUserId": 1, createdAt: -1 },
+    { "brandBreakdown.sellerUserId": 1, createdAt: -1 }
+  ]
 });
 
-// ✅ Indexes for performance
-orderSchema.index({ buyerUserId: 1, createdAt: -1 });
-orderSchema.index({ staffUserId: 1, createdAt: -1 });
-orderSchema.index({ "products.sellerUserId": 1, createdAt: -1 });
-orderSchema.index({ "brandBreakdown.sellerUserId": 1, createdAt: -1 });
-orderSchema.index({ status: 1, createdAt: -1 });
-orderSchema.index({ paymentStatus: 1 });
-
-// ✅ UPDATED: Calculate brand-wise breakdown with proper GST
+// ✅ Method to calculate brand-wise breakdown
 orderSchema.methods.calculateBrandBreakdown = function() {
   const brandMap = new Map();
   
@@ -146,65 +108,19 @@ orderSchema.methods.calculateBrandBreakdown = function() {
       brandMap.set(key, {
         brand: item.brand,
         sellerUserId: item.sellerUserId,
-        subtotalPaise: 0,
-        gstPaise: 0
+        subtotalPaise: 0
       });
     }
-    
-    const entry = brandMap.get(key);
-    entry.subtotalPaise += item.totalPaise || 0;
-    
-    // Calculate GST for this product
-    const gstPct = item.gstPercentage || 0;
-    const gstType = item.gstType || 'exclusive';
-    
-    if (gstType === 'exclusive') {
-      // GST is additional
-      const lineGst = Math.round((item.totalPaise * gstPct) / 100);
-      entry.gstPaise += lineGst;
-    } else {
-      // GST is included
-      const basePrice = Math.round((item.totalPaise * 100) / (100 + gstPct));
-      const lineGst = item.totalPaise - basePrice;
-      entry.gstPaise += lineGst;
-    }
+  
+    brandMap.get(key).subtotalPaise += item.totalPaise;
   });
-  
-  // Convert to breakdown array with proper GST
+  // Convert to breakdown array with tax calculation
   this.brandBreakdown = Array.from(brandMap.values()).map(item => ({
-    brand: item.brand,
-    sellerUserId: item.sellerUserId,
-    subtotalPaise: item.subtotalPaise,
-    taxPaise: item.gstPaise,
-    totalPaise: item.subtotalPaise + item.gstPaise
+    ...item,
+    taxPaise: Math.round(item.subtotalPaise * 0.18), // 18% GST
+    totalPaise: Math.round(item.subtotalPaise * 1.18)
   }));
-  
   return this;
 };
-
-// ✅ Virtual for rupees amounts (convenience)
-orderSchema.virtual('subtotal').get(function() {
-  return (this.subtotalPaise || 0) / 100;
-});
-
-orderSchema.virtual('discount').get(function() {
-  return (this.discountPaise || 0) / 100;
-});
-
-orderSchema.virtual('tax').get(function() {
-  return (this.taxPaise || 0) / 100;
-});
-
-orderSchema.virtual('finalAmount').get(function() {
-  return (this.finalAmountPaise || 0) / 100;
-});
-
-orderSchema.virtual('paidAmount').get(function() {
-  return (this.paidAmountPaise || 0) / 100;
-});
-
-orderSchema.virtual('remainingAmount').get(function() {
-  return ((this.finalAmountPaise || 0) - (this.paidAmountPaise || 0)) / 100;
-});
 
 module.exports = mongoose.model("Order", orderSchema);
