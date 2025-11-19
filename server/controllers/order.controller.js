@@ -1296,16 +1296,25 @@ exports.bulkUpdateOrders = async (req, res) => {
 };
 
 // ✅ BULK DISPATCH ORDERS
+// ✅ BULK DISPATCH ORDERS (updated to allow sellers for their own products)
 exports.bulkDispatchOrders = async (req, res) => {
   try {
     const { orderIds, courier, dispatchNote = "" } = req.body;
     const userId = req.user._id;
     const userRole = req.user.role;
 
-    if (!["staff", "admin"].includes(userRole)) {
+    // Allow sellers too, but only for their own products
+    if (!["staff", "admin", "seller"].includes(userRole)) {
       return res.status(403).json({
         ok: false,
-        message: "Access denied - staff/admin only"
+        message: "Access denied - staff/admin/seller only"
+      });
+    }
+
+    if (!Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        message: "orderIds array is required"
       });
     }
 
@@ -1313,51 +1322,81 @@ exports.bulkDispatchOrders = async (req, res) => {
 
     for (const orderId of orderIds) {
       try {
-        let filter = {
-          _id: orderId,
-          status: "packed"
-        };
-
-        // Staff can only dispatch their buyers' orders
-        if (userRole === "staff") {
-          filter.staffUserId = userId;
+        // Build filter: staff/admin can dispatch any order with status 'packed'
+        // seller can only dispatch if they have products in the order and order is 'packed'
+        let order;
+        if (userRole === "seller") {
+          // find the order by id and ensure it contains at least one product for this seller
+          order = await Order.findOne({
+            _id: orderId,
+            status: "packed",
+            // non-atomic check; we'll further validate product-level ownership below
+          }).lean();
+        } else if (userRole === "staff") {
+          order = await Order.findOne({ _id: orderId, status: "packed", staffUserId: userId }).lean();
+        } else { // admin
+          order = await Order.findOne({ _id: orderId, status: "packed" }).lean();
         }
-
-        const order = await Order.findOne(filter);
 
         if (!order) {
           results.push({
             orderId,
             success: false,
-            error: "Order not found or not ready for dispatch"
+            error: "Order not found or not ready for dispatch / not accessible"
           });
           continue;
         }
 
-        // Generate AWB number
+        // For seller: ensure at least one product in order belongs to this seller
+        if (userRole === "seller") {
+          const sellerHasProducts = Array.isArray(order.products) && order.products.some(p => {
+            const sellerField = p.sellerUserId;
+            const sellerIdStr = sellerField && sellerField._id ? sellerField._id.toString() : (sellerField ? sellerField.toString() : null);
+            return sellerIdStr === userId.toString();
+          });
+
+          if (!sellerHasProducts) {
+            results.push({
+              orderId,
+              success: false,
+              error: "Access denied - you do not own any products in this order"
+            });
+            continue;
+          }
+        }
+
+        // Re-fetch with Mongoose doc to update and save (we used .lean above)
+        const orderDoc = await Order.findById(orderId);
+
+        if (!orderDoc) {
+          results.push({ orderId, success: false, error: "Order not found on re-fetch" });
+          continue;
+        }
+
+        // Generate AWB if not provided by client (or you can accept client's awb via payload)
         const awb = `AWB${Date.now()}${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
 
-        // Update dispatch info
-        order.status = "shipped";
-        order.dispatch = {
-          courier,
+        // Update dispatch details; keep existing structure but ensure sellers only update allowed fields
+        orderDoc.status = "shipped";
+        orderDoc.dispatch = {
+          courier: courier || orderDoc.dispatch?.courier || "Unknown",
           awb,
           note: dispatchNote,
           dispatchedAt: new Date(),
           dispatchedBy: userId
         };
 
-        if (!order.statusLogs) order.statusLogs = [];
-        order.statusLogs.push({
+        if (!orderDoc.statusLogs) orderDoc.statusLogs = [];
+        orderDoc.statusLogs.push({
           timestamp: new Date(),
           actionBy: userId,
           action: "SHIPPED",
-          note: `Dispatched via ${courier}, AWB: ${awb}`
+          note: `Dispatched via ${courier || "courier"}, AWB: ${awb}`
         });
 
-        await order.save();
-        results.push({ orderId, success: true, awb });
+        await orderDoc.save();
 
+        results.push({ orderId, success: true, awb });
       } catch (error) {
         results.push({ orderId, success: false, error: error.message });
       }
@@ -1370,6 +1409,7 @@ exports.bulkDispatchOrders = async (req, res) => {
     });
 
   } catch (error) {
+    console.error("Bulk dispatch failed:", error);
     res.status(500).json({
       ok: false,
       message: "Bulk dispatch failed",
@@ -1377,6 +1417,7 @@ exports.bulkDispatchOrders = async (req, res) => {
     });
   }
 };
+
 
 // ============================
 // 7. UTILITY FUNCTIONS
