@@ -952,6 +952,7 @@ exports.getStaffBuyers = async (req, res) => {
 // 5. STATUS UPDATE FUNCTIONS
 // ============================
 
+
 // ✅ UPDATE ORDER STATUS (Role-based permissions)
 exports.updateOrderStatus = async (req, res) => {
   try {
@@ -961,7 +962,7 @@ exports.updateOrderStatus = async (req, res) => {
     const userRole = req.user.role;
 
     const validStatuses = [
-      "confirmed", "processing", "packed",
+      "confirmed", "processing", "packed", 
       "shipped", "delivered", "cancelled"
     ];
 
@@ -983,7 +984,7 @@ exports.updateOrderStatus = async (req, res) => {
     // Role-based authorization
     let canUpdate = false;
     let allowedStatuses = [];
-
+    
     if (userRole === "admin") {
       canUpdate = true;
       allowedStatuses = validStatuses;
@@ -998,8 +999,8 @@ exports.updateOrderStatus = async (req, res) => {
       allowedStatuses = ["processing", "packed"];
     } else if (userRole === "buyer") {
       canUpdate = (
-        order.buyerUserId.toString() === userId.toString() &&
-        status === "cancelled" &&
+        order.buyerUserId.toString() === userId.toString() && 
+        status === "cancelled" && 
         !["shipped", "delivered"].includes(order.status)
       );
       allowedStatuses = ["cancelled"];
@@ -1039,7 +1040,7 @@ exports.updateOrderStatus = async (req, res) => {
     // Update order status
     order.status = status;
     if (!order.statusLogs) order.statusLogs = [];
-
+    
     order.statusLogs.push({
       timestamp: new Date(),
       actionBy: userId,
