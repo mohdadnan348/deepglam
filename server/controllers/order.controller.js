@@ -953,7 +953,7 @@ exports.getStaffBuyers = async (req, res) => {
 // ============================
 
 // ✅ UPDATE ORDER STATUS (Role-based permissions)
-// ✅ UPDATE ORDER STATUS (Role-based permissions)
+// ✅ UPDATE ORDER STATUS (Role-based permissions) — debugging-enhanced version
 exports.updateOrderStatus = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -969,7 +969,8 @@ exports.updateOrderStatus = async (req, res) => {
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
         ok: false,
-        message: "Invalid status value"
+        message: "Invalid status value",
+        debug: { providedStatus: status, allowed: validStatuses }
       });
     }
 
@@ -977,11 +978,14 @@ exports.updateOrderStatus = async (req, res) => {
     if (!order) {
       return res.status(404).json({
         ok: false,
-        message: "Order not found"
+        message: "Order not found",
+        debug: { orderId }
       });
     }
 
+    // ---------------------------
     // Role-based authorization
+    // ---------------------------
     let canUpdate = false;
     let allowedStatuses = [];
 
@@ -989,41 +993,71 @@ exports.updateOrderStatus = async (req, res) => {
       canUpdate = true;
       allowedStatuses = validStatuses;
     } else if (userRole === "staff") {
-      canUpdate = order.staffUserId.toString() === userId.toString();
+      // defensive: allow staff if staffUserId may be ObjectId or string
+      const staffIdStr = order.staffUserId && order.staffUserId.toString ? order.staffUserId.toString() : null;
+      canUpdate = staffIdStr && staffIdStr === userId.toString();
       allowedStatuses = validStatuses;
     } else if (userRole === "seller") {
-      // Robust seller product check: handles populated { _id } or plain ObjectId
+      // Robust seller product check: handles populated object, nested _id, or plain ObjectId string
       const hasSellerProducts = Array.isArray(order.products) && order.products.some(product => {
         const sellerField = product.sellerUserId;
-        const sellerIdStr = (sellerField && sellerField._id) ? sellerField._id.toString() :
-                            (sellerField && typeof sellerField.toString === 'function') ? sellerField.toString() :
-                            null;
-        return sellerIdStr && sellerIdStr === userId.toString();
+        if (!sellerField) return false;
+        // sellerField could be ObjectId, string, or populated object with _id
+        const sellerIdStr = sellerField._id ? sellerField._id.toString() : sellerField.toString();
+        return sellerIdStr === userId.toString();
       });
 
       canUpdate = hasSellerProducts;
-      // Sellers are allowed to move to processing/packed (business may extend later)
       allowedStatuses = ["processing", "packed"];
     } else if (userRole === "buyer") {
+      const buyerIdStr = order.buyerUserId && order.buyerUserId.toString ? order.buyerUserId.toString() : null;
       canUpdate = (
-        order.buyerUserId.toString() === userId.toString() &&
+        buyerIdStr && buyerIdStr === userId.toString() &&
         status === "cancelled" &&
         !["shipped", "delivered"].includes(order.status)
       );
       allowedStatuses = ["cancelled"];
     }
 
+    // If permission denied, return debug info
     if (!canUpdate) {
+      console.warn('updateOrderStatus - access denied', {
+        orderId,
+        userId: userId.toString(),
+        userRole,
+        requestedStatus: status
+      });
+
       return res.status(403).json({
         ok: false,
-        message: "Access denied - cannot update this order status"
+        message: "Access denied - cannot update this order status",
+        debug: {
+          orderId,
+          userId: userId.toString(),
+          userRole,
+          requestedStatus: status,
+          orderStatus: order.status,
+          staffUserId: order.staffUserId ? order.staffUserId.toString() : null,
+          buyerUserId: order.buyerUserId ? order.buyerUserId.toString() : null,
+          productsCount: Array.isArray(order.products) ? order.products.length : 0,
+          sampleProducts: Array.isArray(order.products) ? order.products.slice(0,3).map(p => ({
+            sellerUserId: p.sellerUserId ? (p.sellerUserId._id ? p.sellerUserId._id.toString() : p.sellerUserId.toString()) : null,
+            product: p.product ? p.product.toString() : null
+          })) : []
+        }
       });
     }
 
+    // If the requested status isn't one of the role-allowed next statuses for them
     if (!allowedStatuses.includes(status)) {
       return res.status(400).json({
         ok: false,
-        message: `You can only update status to: ${allowedStatuses.join(", ")}`
+        message: `You can only update status to: ${allowedStatuses.join(", ")}`,
+        debug: {
+          userRole,
+          allowedStatuses,
+          requestedStatus: status
+        }
       });
     }
 
@@ -1045,20 +1079,33 @@ exports.updateOrderStatus = async (req, res) => {
     // Relax transitions for sellers only: allow seller to mark 'packed' from 'confirmed'
     if (userRole === "seller") {
       if (order.status === "confirmed") {
-        // allow seller to directly set to 'processing' or 'packed'
         allowedNextStatuses = Array.from(new Set([...allowedNextStatuses, "processing", "packed"]));
       }
       if (order.status === "processing") {
-        // ensure packed is allowed (it already is by validTransitions but keep defensive)
         allowedNextStatuses = Array.from(new Set([...allowedNextStatuses, "packed"]));
       }
     }
 
-    // Final check: requested status must be in computed allowedNextStatuses
+    // Debug log of computed values
+    console.debug('updateOrderStatus debug', {
+      orderId,
+      orderStatus: order.status,
+      userId: userId.toString(),
+      userRole,
+      requestedStatus: status,
+      allowedNextStatuses,
+      allowedStatuses
+    });
+
     if (!allowedNextStatuses.includes(status)) {
       return res.status(400).json({
         ok: false,
-        message: `Cannot change status from ${order.status} to ${status}`
+        message: `Cannot change status from ${order.status} to ${status}`,
+        debug: {
+          orderStatus: order.status,
+          requestedStatus: status,
+          allowedNextStatuses
+        }
       });
     }
 
@@ -1075,14 +1122,19 @@ exports.updateOrderStatus = async (req, res) => {
 
     await order.save();
 
+    // Return trimmed debug info so client can see success context
     res.json({
       ok: true,
       message: `Order status updated to ${status}`,
-      data: order
+      data: {
+        _id: order._id,
+        status: order.status,
+        statusLogs: order.statusLogs.slice(-5) // last few logs
+      }
     });
 
   } catch (error) {
-    console.error("Update order status error:", error);
+    console.error("Update order status error (EXCEPTION):", error);
     res.status(500).json({
       ok: false,
       message: "Failed to update order status",
@@ -1090,6 +1142,7 @@ exports.updateOrderStatus = async (req, res) => {
     });
   }
 };
+
 
 // ✅ UPDATE PAYMENT STATUS
 exports.updatePaymentStatus = async (req, res) => {
