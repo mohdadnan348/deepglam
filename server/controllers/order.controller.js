@@ -14,169 +14,12 @@ const toInt = (v, fallback = 0) => {
 // ============================
 // 1. BUYER FUNCTIONS
 // ============================
+
 /*
-// ✅ CREATE ORDER (Buyer only)
-exports.createOrder = async (req, res) => {
-  try {
-    const buyerUserId = req.user._id;
-
-    const {
-      products = [],
-      deliveryAddress,
-      notes = "",
-      discountPaise = 0
-    } = req.body;
-
-    if (!products || products.length === 0) {
-      return res.status(400).json({
-        ok: false,
-        message: "Products are required to create order"
-      });
-    }
-
-    // Get buyer profile
-    const buyerProfile = await BuyerProfile.findOne({ userId: buyerUserId })
-      .populate('staffUserId', 'name phone email');
-
-    if (!buyerProfile) {
-      return res.status(404).json({
-        ok: false,
-        message: "Buyer profile not found"
-      });
-    }
-
-    // Fetch product details with seller info
-    const productIds = products.map(item => item.productId);
-    const productDetails = await Product.find({ _id: { $in: productIds } })
-      .populate('userId', 'name email businessName phone');
-
-    if (productDetails.length !== productIds.length) {
-      return res.status(400).json({
-        ok: false,
-        message: "Some products not found in database"
-      });
-    }
-
-    // Build order products
-    let subtotalPaise = 0;
-    const orderProducts = products.map(item => {
-      const product = productDetails.find(p => p._id.toString() === item.productId);
-      if (!product) throw new Error(`Product not found: ${item.productId}`);
-
-      const quantity = Math.max(1, Number(item.quantity) || 1);
-
-      let pricePerUnitPaise;
-      if (product.salePrice) {
-        pricePerUnitPaise = Math.round(product.salePrice * 100);
-      } else if (product.price) {
-        pricePerUnitPaise = Math.round(product.price * 100);
-      } else {
-        pricePerUnitPaise = 0;
-      }
-
-      const totalPaise = quantity * pricePerUnitPaise;
-      subtotalPaise += totalPaise;
-
-      return {
-        product: product._id,
-        productName: product.productName,
-        sellerUserId: product.userId ? product.userId._id : null,
-        brand: product.brand || "Unknown",
-        quantity,
-        pricePerUnitPaise,
-        totalPaise
-      };
-    });
-
-    // Auto-derive delivery address
-    let finalDeliveryAddress;
-
-    if (deliveryAddress && deliveryAddress.shopName && deliveryAddress.fullAddress) {
-      finalDeliveryAddress = {
-        shopName: deliveryAddress.shopName,
-        fullAddress: deliveryAddress.fullAddress,
-        city: deliveryAddress.city || buyerProfile.shopAddress.city,
-        state: deliveryAddress.state || buyerProfile.shopAddress.state,
-        postalCode: deliveryAddress.postalCode || buyerProfile.shopAddress.postalCode,
-        country: deliveryAddress.country || buyerProfile.shopAddress.country || "India"
-      };
-    } else {
-      finalDeliveryAddress = {
-        shopName: buyerProfile.shopName,
-        fullAddress: `${buyerProfile.shopAddress.line1}${buyerProfile.shopAddress.line2 ? ', ' + buyerProfile.shopAddress.line2 : ''}, ${buyerProfile.shopAddress.city}, ${buyerProfile.shopAddress.state}`,
-        city: buyerProfile.shopAddress.city,
-        state: buyerProfile.shopAddress.state,
-        postalCode: buyerProfile.shopAddress.postalCode,
-        country: buyerProfile.shopAddress.country || "India"
-      };
-    }
-
-    // Calculate totals
-    const taxRate = 0.18;
-    const discountedSubtotal = Math.max(0, subtotalPaise - discountPaise);
-    const taxPaise = Math.round(discountedSubtotal * taxRate);
-    const finalAmountPaise = discountedSubtotal + taxPaise;
-
-    // Generate order number
-    const orderNumber = `ORD-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
-
-    // Create order
-    const order = new Order({
-      buyerUserId,
-      staffUserId: buyerProfile.staffUserId._id || buyerProfile.staffUserId,
-      employeeCode: buyerProfile.employeeCode,
-      orderNumber,
-      deliveryAddress: finalDeliveryAddress,
-      products: orderProducts,
-      subtotalPaise,
-      discountPaise,
-      taxPaise,
-      finalAmountPaise,
-      paymentStatus: "unpaid",
-      status: "confirmed",
-      notes: notes.trim()
-    });
-
-    // Calculate brand breakdown
-    if (typeof order.calculateBrandBreakdown === "function") {
-      order.calculateBrandBreakdown();
-    }
-
-    await order.save();
-
-    // Populate response data
-    const populatedOrder = await Order.findById(order._id)
-      .populate('buyerUserId', 'name phone email')
-      .populate('staffUserId', 'name phone email')
-      .populate({
-        path: 'products.product',
-        select: 'productName brand mainImage'
-      });
-
-    res.status(201).json({
-      ok: true,
-      message: "Order created successfully",
-      data: {
-        ...populatedOrder.toObject(),
-        subtotal: (populatedOrder.subtotalPaise / 100).toFixed(2),
-        discount: (populatedOrder.discountPaise / 100).toFixed(2),
-        tax: (populatedOrder.taxPaise / 100).toFixed(2),
-        finalAmount: (populatedOrder.finalAmountPaise / 100).toFixed(2)
-      }
-    });
-
-  } catch (error) {
-    console.error("Create order error:", error);
-    res.status(500).json({
-      ok: false,
-      message: "Failed to create order",
-      error: error.message
-    });
-  }
-};
+// legacy createOrder kept as comment for reference...
 */
 
-// CREATE ORDER (Buyer only) - REPLACE existing createOrder with this
+// CREATE ORDER (Buyer only)
 exports.createOrder = async (req, res) => {
   try {
     const buyerUserId = req.user._id;
@@ -476,10 +319,6 @@ exports.getOrders = async (req, res) => {
   }
 };
 
-// ✅ GET ORDER BY ID
-
-
-// controllers/order.controller.js
 // ✅ GET ORDER BY ID (UPDATED WITH PRODUCT POPULATE)
 exports.getOrderById = async (req, res) => {
   try {
@@ -610,8 +449,6 @@ exports.getOrderById = async (req, res) => {
   }
 };
 
-
-
 // ============================
 // 3. SELLER FUNCTIONS
 // ============================
@@ -703,74 +540,6 @@ exports.getSellerDashboard = async (req, res) => {
     res.status(500).json({
       ok: false,
       message: "Failed to fetch seller dashboard",
-      error: error.message
-    });
-  }
-};
-
-// ✅ SELLER EARNINGS
-exports.getSellerEarnings = async (req, res) => {
-  try {
-    const sellerId = req.user._id;
-
-    if (req.user.role !== "seller") {
-      return res.status(403).json({
-        ok: false,
-        message: "Access denied - sellers only"
-      });
-    }
-
-    const {
-      period = "monthly",
-      year = new Date().getFullYear(),
-      month = new Date().getMonth() + 1
-    } = req.query;
-
-    let dateFilter = {};
-    let groupBy = {};
-
-    if (period === "monthly") {
-      dateFilter = {
-        createdAt: {
-          $gte: new Date(year, month - 1, 1),
-          $lt: new Date(year, month, 1)
-        }
-      };
-      groupBy = {
-        _id: { $dayOfMonth: "$createdAt" },
-        earnings: { $sum: "$products.totalPaise" },
-        orders: { $sum: 1 }
-      };
-    }
-
-    const earnings = await Order.aggregate([
-      { $match: { "products.sellerUserId": sellerId, ...dateFilter } },
-      { $unwind: "$products" },
-      { $match: { "products.sellerUserId": sellerId } },
-      { $group: groupBy },
-      { $sort: { "_id": 1 } }
-    ]);
-
-    const totalEarnings = earnings.reduce((sum, day) => sum + day.earnings, 0);
-
-    res.json({
-      ok: true,
-      data: {
-        period,
-        totalEarnings: Math.round(totalEarnings / 100),
-        dailyBreakdown: earnings.map(day => ({
-          day: day._id,
-          earnings: Math.round(day.earnings / 100),
-          orders: day.orders
-        }))
-      }
-    });
-
-  } catch (error) {
-    console.error("Seller earnings error:", error);
-    res.status(500).json({
-      ok: false,
-      message: "Failed to fetch seller earnings",
       error: error.message
     });
   }
@@ -888,72 +657,11 @@ exports.getStaffDashboard = async (req, res) => {
   }
 };
 
-// ✅ GET STAFF'S BUYERS
-exports.getStaffBuyers = async (req, res) => {
-  try {
-    const staffId = req.user._id;
-
-    if (req.user.role !== "staff") {
-      return res.status(403).json({
-        ok: false,
-        message: "Access denied - staff only"
-      });
-    }
-
-    const buyers = await BuyerProfile.find({ staffUserId: staffId })
-      .populate('userId', 'name phone email')
-      .select('shopName shopAddress approvalStatus kycVerified creditLimitPaise currentDuePaise')
-      .sort({ createdAt: -1 });
-
-    // Get order stats for each buyer
-    const buyersWithStats = await Promise.all(
-      buyers.map(async (buyer) => {
-        const [totalOrders, pendingOrders, totalSpent] = await Promise.all([
-          Order.countDocuments({ buyerUserId: buyer.userId._id }),
-          Order.countDocuments({
-            buyerUserId: buyer.userId._id,
-            status: { $in: ["confirmed", "processing", "packed"] }
-          }),
-          Order.aggregate([
-            { $match: { buyerUserId: buyer.userId._id } },
-            { $group: { _id: null, total: { $sum: "$finalAmountPaise" } } }
-          ])
-        ]);
-
-        const spent = totalSpent.length > 0 ? totalSpent[0].total : 0;
-
-        return {
-          ...buyer.toObject(),
-          stats: {
-            totalOrders,
-            pendingOrders,
-            totalSpent: Math.round(spent / 100)
-          }
-        };
-      })
-    );
-
-    res.json({
-      ok: true,
-      data: buyersWithStats
-    });
-
-  } catch (error) {
-    console.error("Get staff buyers error:", error);
-    res.status(500).json({
-      ok: false,
-      message: "Failed to fetch staff buyers",
-      error: error.message
-    });
-  }
-};
-
 // ============================
 // 5. STATUS UPDATE FUNCTIONS
 // ============================
 
-// ✅ UPDATE ORDER STATUS (Role-based permissions)
-// ✅ UPDATE ORDER STATUS (Role-based permissions) — debugging-enhanced version
+// DEBUG-ENHANCED UPDATE ORDER STATUS
 exports.updateOrderStatus = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -1143,7 +851,6 @@ exports.updateOrderStatus = async (req, res) => {
   }
 };
 
-
 // ✅ UPDATE PAYMENT STATUS
 exports.updatePaymentStatus = async (req, res) => {
   try {
@@ -1295,8 +1002,7 @@ exports.bulkUpdateOrders = async (req, res) => {
   }
 };
 
-// ✅ BULK DISPATCH ORDERS
-// ✅ BULK DISPATCH ORDERS (updated to allow sellers for their own products)
+// DEBUG-ENHANCED BULK DISPATCH ORDERS (allows sellers for their own products)
 exports.bulkDispatchOrders = async (req, res) => {
   try {
     const { orderIds, courier, dispatchNote = "" } = req.body;
@@ -1418,14 +1124,11 @@ exports.bulkDispatchOrders = async (req, res) => {
   }
 };
 
-
 // ============================
 // 7. UTILITY FUNCTIONS
 // ============================
 
-// ✅ GET BRAND-WISE BILL
-
-// ✅ GET BRAND-WISE BILL (UPDATED WITH PRODUCT POPULATE)
+// GET BRAND-WISE BILL (UPDATED WITH PRODUCT POPULATE)
 exports.getBrandWiseBill = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -1438,14 +1141,14 @@ exports.getBrandWiseBill = async (req, res) => {
       });
     }
 
-    // ✅ Populate products with purchasePrice from Product model
+    // Populate products with purchasePrice from Product model
     const order = await Order.findById(orderId)
       .populate('buyerUserId', 'name phone email')
       .populate('products.sellerUserId', 'name email businessName phone role')
       .populate('brandBreakdown.sellerUserId', 'name email businessName phone role')
       .populate({
         path: 'products.product',
-        select: 'productName brand purchasePrice salePrice price' // ✅ Include purchasePrice
+        select: 'productName brand purchasePrice salePrice price' // Include purchasePrice
       })
       .lean();
 
@@ -1474,16 +1177,16 @@ exports.getBrandWiseBill = async (req, res) => {
       });
     }
 
-    // ✅ Fetch seller details from Seller model
+    // Fetch seller details from Seller model
     const Seller = require("../models/seller.model");
     const sellerInfo = await Seller.findOne({ userId: sellerUserId }).lean();
 
-    // ✅ Calculate amounts based on price type with product populate
+    // Calculate amounts based on price type with product populate
     let subtotal = 0;
     const productsWithPricing = brandProducts.map(product => {
       let pricePerUnit, total;
       
-      // ✅ Get purchase price from populated product OR order field
+      // Get purchase price from populated product OR order field
       const purchasePricePerUnitPaise = product.product?.purchasePrice 
         ? Math.round(product.product.purchasePrice * 100)
         : (product.purchasePricePerUnitPaise || product.pricePerUnitPaise);
@@ -1504,7 +1207,7 @@ exports.getBrandWiseBill = async (req, res) => {
         quantity: product.quantity,
         pricePerUnitPaise: pricePerUnit,
         totalPaise: total,
-        // ✅ Include both prices for reference
+        // Include both prices for reference
         sellingPricePaise: product.pricePerUnitPaise,
         purchasePricePaise: purchasePricePerUnitPaise
       };
@@ -1527,7 +1230,7 @@ exports.getBrandWiseBill = async (req, res) => {
         address: order.deliveryAddress
       },
 
-      // ✅ Seller details with address
+      // Seller details with address
       sellerDetails: sellerInfo ? {
         brandName: sellerInfo.brandName,
         gstNumber: sellerInfo.gstNumber,
@@ -1573,8 +1276,6 @@ exports.getBrandWiseBill = async (req, res) => {
     });
   }
 };
-
-
 
 // ✅ CANCEL ORDER
 exports.cancelOrder = async (req, res) => {
@@ -1643,4 +1344,3 @@ exports.cancelOrder = async (req, res) => {
     });
   }
 };
-
