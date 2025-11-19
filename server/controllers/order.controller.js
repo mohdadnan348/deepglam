@@ -953,6 +953,7 @@ exports.getStaffBuyers = async (req, res) => {
 // ============================
 
 // ✅ UPDATE ORDER STATUS (Role-based permissions)
+// ✅ UPDATE ORDER STATUS (Role-based permissions)
 exports.updateOrderStatus = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -991,10 +992,17 @@ exports.updateOrderStatus = async (req, res) => {
       canUpdate = order.staffUserId.toString() === userId.toString();
       allowedStatuses = validStatuses;
     } else if (userRole === "seller") {
-      const hasSellerProducts = order.products.some(
-        product => product.sellerUserId.toString() === userId.toString()
-      );
+      // Robust seller product check: handles populated { _id } or plain ObjectId
+      const hasSellerProducts = Array.isArray(order.products) && order.products.some(product => {
+        const sellerField = product.sellerUserId;
+        const sellerIdStr = (sellerField && sellerField._id) ? sellerField._id.toString() :
+                            (sellerField && typeof sellerField.toString === 'function') ? sellerField.toString() :
+                            null;
+        return sellerIdStr && sellerIdStr === userId.toString();
+      });
+
       canUpdate = hasSellerProducts;
+      // Sellers are allowed to move to processing/packed (business may extend later)
       allowedStatuses = ["processing", "packed"];
     } else if (userRole === "buyer") {
       canUpdate = (
@@ -1019,7 +1027,9 @@ exports.updateOrderStatus = async (req, res) => {
       });
     }
 
+    // -----------------------------
     // Status transition validation
+    // -----------------------------
     const validTransitions = {
       "confirmed": ["processing", "cancelled"],
       "processing": ["packed", "cancelled"],
@@ -1029,7 +1039,23 @@ exports.updateOrderStatus = async (req, res) => {
       "cancelled": []
     };
 
-    if (!validTransitions[order.status]?.includes(status)) {
+    // Compute allowed next statuses based on current order.status
+    let allowedNextStatuses = validTransitions[order.status] || [];
+
+    // Relax transitions for sellers only: allow seller to mark 'packed' from 'confirmed'
+    if (userRole === "seller") {
+      if (order.status === "confirmed") {
+        // allow seller to directly set to 'processing' or 'packed'
+        allowedNextStatuses = Array.from(new Set([...allowedNextStatuses, "processing", "packed"]));
+      }
+      if (order.status === "processing") {
+        // ensure packed is allowed (it already is by validTransitions but keep defensive)
+        allowedNextStatuses = Array.from(new Set([...allowedNextStatuses, "packed"]));
+      }
+    }
+
+    // Final check: requested status must be in computed allowedNextStatuses
+    if (!allowedNextStatuses.includes(status)) {
       return res.status(400).json({
         ok: false,
         message: `Cannot change status from ${order.status} to ${status}`
