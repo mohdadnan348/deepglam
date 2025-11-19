@@ -434,6 +434,8 @@ exports.getSellerById = async (req, res) => {
     });
   }
 };
+
+
 // ✅ Get currently logged-in seller's profile
 exports.getMyProfile = async (req, res) => {
   try {

@@ -27,7 +27,7 @@ router.put("/:orderId/payment", verifyJWT, requireRole(["staff", "admin"]), orde
 router.post("/dispatch", verifyJWT, requireRole(["staff", "admin"]), orderCtrl.bulkDispatchOrders);
 
 // ✅ 5. ADMIN ROUTES
-router.get("/", verifyJWT, requireRole(["admin"]), orderCtrl.getOrders);
+router.get("/", verifyJWT, orderCtrl.getOrders);
 router.put("/bulk", verifyJWT, requireRole(["staff", "admin"]), orderCtrl.bulkUpdateOrders);
 
 module.exports = router;

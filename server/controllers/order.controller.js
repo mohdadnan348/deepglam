@@ -4,6 +4,7 @@ const Order = require("../models/order.model");
 const Product = require("../models/product.model");
 const BuyerProfile = require("../models/buyer.model");
 const User = require("../models/user.model");
+const Seller = require("../models/seller.model");
 
 const toInt = (v, fallback = 0) => {
   const n = parseInt(v, 10);
@@ -13,7 +14,7 @@ const toInt = (v, fallback = 0) => {
 // ============================
 // 1. BUYER FUNCTIONS
 // ============================
-
+/*
 // ✅ CREATE ORDER (Buyer only)
 exports.createOrder = async (req, res) => {
   try {
@@ -63,7 +64,7 @@ exports.createOrder = async (req, res) => {
       if (!product) throw new Error(`Product not found: ${item.productId}`);
 
       const quantity = Math.max(1, Number(item.quantity) || 1);
-      
+
       let pricePerUnitPaise;
       if (product.salePrice) {
         pricePerUnitPaise = Math.round(product.salePrice * 100);
@@ -72,7 +73,7 @@ exports.createOrder = async (req, res) => {
       } else {
         pricePerUnitPaise = 0;
       }
-      
+
       const totalPaise = quantity * pricePerUnitPaise;
       subtotalPaise += totalPaise;
 
@@ -89,7 +90,7 @@ exports.createOrder = async (req, res) => {
 
     // Auto-derive delivery address
     let finalDeliveryAddress;
-    
+
     if (deliveryAddress && deliveryAddress.shopName && deliveryAddress.fullAddress) {
       finalDeliveryAddress = {
         shopName: deliveryAddress.shopName,
@@ -173,6 +174,212 @@ exports.createOrder = async (req, res) => {
     });
   }
 };
+*/
+
+// CREATE ORDER (Buyer only) - REPLACE existing createOrder with this
+exports.createOrder = async (req, res) => {
+  try {
+    const buyerUserId = req.user._id;
+
+    const {
+      products = [],
+      deliveryAddress,
+      notes = "",
+      discountPaise = 0
+    } = req.body;
+
+    if (!products || products.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        message: "Products are required to create order"
+      });
+    }
+
+    // Get buyer profile
+    const buyerProfile = await BuyerProfile.findOne({ userId: buyerUserId })
+      .populate('staffUserId', 'name phone email');
+
+    if (!buyerProfile) {
+      return res.status(404).json({
+        ok: false,
+        message: "Buyer profile not found"
+      });
+    }
+
+    // Fetch product details with seller info
+    const productIds = products.map(item => item.productId);
+    const productDetails = await Product.find({ _id: { $in: productIds } })
+      .populate('userId', 'name email businessName phone');
+
+    if (productDetails.length !== productIds.length) {
+      return res.status(400).json({
+        ok: false,
+        message: "Some products not found in database"
+      });
+    }
+
+    // Helper: convert DB price (rupees) -> paise
+    const dbPriceToPaise = (p) => {
+      const n = Number(p || 0);
+      if (Number.isNaN(n)) return 0;
+      return Math.round(n * 100);
+    };
+
+    // Tolerance in paise for small rounding diffs (1 paise)
+    const EPSILON_PAISE = 1;
+
+    // Build order products using client unitPricePaise if valid, else DB price
+    let subtotalPaise = 0;
+    const orderProducts = products.map(item => {
+      const product = productDetails.find(p => p._id.toString() === item.productId);
+      if (!product) throw new Error(`Product not found: ${item.productId}`);
+
+      const quantity = Math.max(1, Number(item.quantity) || 1);
+
+      // DB authoritative price (prefer salePrice -> price -> purchasePrice)
+      const dbUnitPaise = dbPriceToPaise(product.salePrice ?? product.finalPrice ?? product.price ?? product.purchasePrice ?? 0);
+
+      // Client provided price (expect units in paise if client follows new contract)
+      // Accept either `unitPricePaise` (preferred) or `unitPrice` (rupees) for compatibility
+      let clientUnitPaise = null;
+      if (typeof item.unitPricePaise !== "undefined" && item.unitPricePaise !== null) {
+        const parsed = Number(item.unitPricePaise);
+        if (!Number.isNaN(parsed) && parsed >= 0) clientUnitPaise = Math.round(parsed);
+      } else if (typeof item.unitPrice !== "undefined" && item.unitPrice !== null) {
+        const parsedR = Number(item.unitPrice);
+        if (!Number.isNaN(parsedR) && parsedR >= 0) clientUnitPaise = Math.round(parsedR * 100);
+      }
+
+      // Decide final unit price to use (paise)
+      let pricePerUnitPaise;
+      if (clientUnitPaise !== null) {
+        if (dbUnitPaise > 0) {
+          // Accept client price only if it matches DB price within tolerance
+          if (Math.abs(clientUnitPaise - dbUnitPaise) <= EPSILON_PAISE) {
+            pricePerUnitPaise = clientUnitPaise;
+          } else {
+            // mismatch -> prefer DB price (log for investigation)
+            console.warn('Client price mismatch for createOrder - using DB price', {
+              productId: product._id.toString(),
+              clientUnitPaise,
+              dbUnitPaise,
+              buyerUserId
+            });
+            pricePerUnitPaise = dbUnitPaise;
+          }
+        } else {
+          // DB has no price -> accept client price (after basic validation)
+          pricePerUnitPaise = clientUnitPaise;
+        }
+      } else {
+        // no client price -> use DB
+        pricePerUnitPaise = dbUnitPaise;
+      }
+
+      // Ensure non-negative
+      pricePerUnitPaise = Math.max(0, Number(pricePerUnitPaise || 0));
+
+      const totalPaise = quantity * pricePerUnitPaise;
+      subtotalPaise += totalPaise;
+
+      return {
+        product: product._id,
+        productName: product.productName,
+        sellerUserId: product.userId ? product.userId._id : null,
+        brand: product.brand || "Unknown",
+        quantity,
+        pricePerUnitPaise,
+        totalPaise
+      };
+    });
+
+    // Auto-derive delivery address
+    let finalDeliveryAddress;
+
+    if (deliveryAddress && deliveryAddress.shopName && deliveryAddress.fullAddress) {
+      finalDeliveryAddress = {
+        shopName: deliveryAddress.shopName,
+        fullAddress: deliveryAddress.fullAddress,
+        city: deliveryAddress.city || buyerProfile.shopAddress.city,
+        state: deliveryAddress.state || buyerProfile.shopAddress.state,
+        postalCode: deliveryAddress.postalCode || buyerProfile.shopAddress.postalCode,
+        country: deliveryAddress.country || buyerProfile.shopAddress.country || "India"
+      };
+    } else {
+      finalDeliveryAddress = {
+        shopName: buyerProfile.shopName,
+        fullAddress: `${buyerProfile.shopAddress.line1}${buyerProfile.shopAddress.line2 ? ', ' + buyerProfile.shopAddress.line2 : ''}, ${buyerProfile.shopAddress.city}, ${buyerProfile.shopAddress.state}`,
+        city: buyerProfile.shopAddress.city,
+        state: buyerProfile.shopAddress.state,
+        postalCode: buyerProfile.shopAddress.postalCode,
+        country: buyerProfile.shopAddress.country || "India"
+      };
+    }
+
+    // Calculate totals (use proper GST rate if your products have per-product GST, adapt accordingly)
+    // Here we infer 18% as earlier behaviour; you may want to use product-level gst if available
+    const taxRate = 0.18;
+    const discountedSubtotal = Math.max(0, subtotalPaise - Number(discountPaise || 0));
+    const taxPaise = Math.round(discountedSubtotal * taxRate);
+    const finalAmountPaise = discountedSubtotal + taxPaise;
+
+    // Generate order number
+    const orderNumber = `ORD-${Date.now()}-${Math.random().toString(36).substr(2, 4).toUpperCase()}`;
+
+    // Create order
+    const order = new Order({
+      buyerUserId,
+      staffUserId: buyerProfile.staffUserId._id || buyerProfile.staffUserId,
+      employeeCode: buyerProfile.employeeCode,
+      orderNumber,
+      deliveryAddress: finalDeliveryAddress,
+      products: orderProducts,
+      subtotalPaise,
+      discountPaise,
+      taxPaise,
+      finalAmountPaise,
+      paymentStatus: "unpaid",
+      status: "confirmed",
+      notes: notes.trim()
+    });
+
+    // Calculate brand breakdown
+    if (typeof order.calculateBrandBreakdown === "function") {
+      order.calculateBrandBreakdown();
+    }
+
+    await order.save();
+
+    // Populate response data
+    const populatedOrder = await Order.findById(order._id)
+      .populate('buyerUserId', 'name phone email')
+      .populate('staffUserId', 'name phone email')
+      .populate({
+        path: 'products.product',
+        select: 'productName brand mainImage'
+      });
+
+    res.status(201).json({
+      ok: true,
+      message: "Order created successfully",
+      data: {
+        ...populatedOrder.toObject(),
+        subtotal: (populatedOrder.subtotalPaise / 100).toFixed(2),
+        discount: (populatedOrder.discountPaise / 100).toFixed(2),
+        tax: (populatedOrder.taxPaise / 100).toFixed(2),
+        finalAmount: (populatedOrder.finalAmountPaise / 100).toFixed(2)
+      }
+    });
+
+  } catch (error) {
+    console.error("Create order error:", error);
+    res.status(500).json({
+      ok: false,
+      message: "Failed to create order",
+      error: error.message
+    });
+  }
+};
 
 // ============================
 // 2. COMMON FUNCTIONS (All Roles)
@@ -181,9 +388,9 @@ exports.createOrder = async (req, res) => {
 // ✅ GET ORDERS (Role-based filtering)
 exports.getOrders = async (req, res) => {
   try {
-    const userId = req.user._id; 
+    const userId = req.user._id;
     const userRole = req.user.role;
-    
+
     const {
       page = 1,
       limit = 20,
@@ -211,7 +418,7 @@ exports.getOrders = async (req, res) => {
 
     if (status) filter.status = status;
     if (paymentStatus) filter.paymentStatus = paymentStatus;
-    
+
     if (dateFrom || dateTo) {
       filter.createdAt = {};
       if (dateFrom) filter.createdAt.$gte = new Date(dateFrom);
@@ -238,7 +445,7 @@ exports.getOrders = async (req, res) => {
     if (userRole === "seller") {
       filteredOrders = orders.map(order => ({
         ...order,
-        products: order.products.filter(product => 
+        products: order.products.filter(product =>
           product.sellerUserId?.toString() === userId.toString()
         ),
         // Calculate seller's portion
@@ -270,19 +477,27 @@ exports.getOrders = async (req, res) => {
 };
 
 // ✅ GET ORDER BY ID
+
+
+// controllers/order.controller.js
+// ✅ GET ORDER BY ID (UPDATED WITH PRODUCT POPULATE)
 exports.getOrderById = async (req, res) => {
   try {
     const { orderId } = req.params;
     const userId = req.user._id;
     const userRole = req.user.role;
 
-    const order = await Order.findById(orderId)
+    // ✅ Step 1: Get order with product details populated
+    let order = await Order.findById(orderId)
       .populate('buyerUserId', 'name phone email')
       .populate('staffUserId', 'name phone email')
+      .populate('products.sellerUserId', 'name phone email role')
+      .populate('brandBreakdown.sellerUserId', 'name phone email role')
       .populate({
         path: 'products.product',
-        select: 'productName brand mainImage'
-      });
+        select: 'productName brand mainImage purchasePrice salePrice price' // ✅ Include purchasePrice
+      })
+      .lean();
 
     if (!order) {
       return res.status(404).json({
@@ -302,7 +517,7 @@ exports.getOrderById = async (req, res) => {
       hasAccess = order.staffUserId._id.toString() === userId.toString();
     } else if (userRole === "seller") {
       hasAccess = order.products.some(product => 
-        product.sellerUserId?.toString() === userId.toString()
+        product.sellerUserId?._id?.toString() === userId.toString()
       );
     }
 
@@ -310,6 +525,73 @@ exports.getOrderById = async (req, res) => {
       return res.status(403).json({
         ok: false,
         message: "Access denied - this order doesn't belong to you"
+      });
+    }
+
+    // ✅ Step 2: Get unique seller user IDs
+    const sellerUserIds = new Set();
+    
+    order.products.forEach(p => {
+      if (p.sellerUserId?._id) {
+        sellerUserIds.add(p.sellerUserId._id.toString());
+      }
+    });
+    
+    if (order.brandBreakdown) {
+      order.brandBreakdown.forEach(b => {
+        if (b.sellerUserId?._id) {
+          sellerUserIds.add(b.sellerUserId._id.toString());
+        }
+      });
+    }
+
+    // ✅ Step 3: Fetch Seller model data
+    const Seller = require("../models/seller.model");
+    
+    const sellers = await Seller.find({ 
+      userId: { $in: Array.from(sellerUserIds) } 
+    }).lean();
+
+    // ✅ Step 4: Create seller map
+    const sellerMap = {};
+    sellers.forEach(seller => {
+      sellerMap[seller.userId.toString()] = {
+        brandName: seller.brandName,
+        gstNumber: seller.gstNumber,
+        address: seller.fullAddress,
+        bankDetails: seller.payoutBankMasked,
+        isApproved: seller.isApproved,
+        kycVerified: seller.kycVerified
+      };
+    });
+
+    // ✅ Step 5: Attach seller details AND purchase price to products
+    order.products = order.products.map(product => {
+      const sellerId = product.sellerUserId?._id?.toString();
+      const sellerInfo = sellerMap[sellerId];
+      
+      // ✅ Get purchase price from populated product
+      const purchasePricePerUnitPaise = product.product?.purchasePrice 
+        ? Math.round(product.product.purchasePrice * 100)
+        : (product.purchasePricePerUnitPaise || product.pricePerUnitPaise); // Fallback
+      
+      return {
+        ...product,
+        purchasePricePerUnitPaise, // ✅ Add purchase price dynamically
+        sellerDetails: sellerInfo || null
+      };
+    });
+
+    // ✅ Step 6: Attach seller details to brand breakdown
+    if (order.brandBreakdown) {
+      order.brandBreakdown = order.brandBreakdown.map(breakdown => {
+        const sellerId = breakdown.sellerUserId?._id?.toString();
+        const sellerInfo = sellerMap[sellerId];
+        
+        return {
+          ...breakdown,
+          sellerDetails: sellerInfo || null
+        };
       });
     }
 
@@ -328,6 +610,8 @@ exports.getOrderById = async (req, res) => {
   }
 };
 
+
+
 // ============================
 // 3. SELLER FUNCTIONS
 // ============================
@@ -337,14 +621,14 @@ exports.getSellerDashboard = async (req, res) => {
   try {
     const sellerId = req.user._id;
     const { period = "30" } = req.query;
-    
+
     if (req.user.role !== "seller") {
       return res.status(403).json({
         ok: false,
         message: "Access denied - sellers only"
       });
     }
-    
+
     const dateFrom = new Date();
     dateFrom.setDate(dateFrom.getDate() - parseInt(period));
 
@@ -407,7 +691,7 @@ exports.getSellerDashboard = async (req, res) => {
           buyer: order.buyerUserId,
           status: order.status,
           createdAt: order.createdAt,
-          sellerProducts: order.products.filter(p => 
+          sellerProducts: order.products.filter(p =>
             p.sellerUserId.toString() === sellerId.toString()
           ).length
         }))
@@ -428,15 +712,15 @@ exports.getSellerDashboard = async (req, res) => {
 exports.getSellerEarnings = async (req, res) => {
   try {
     const sellerId = req.user._id;
-    
+
     if (req.user.role !== "seller") {
       return res.status(403).json({
         ok: false,
         message: "Access denied - sellers only"
       });
     }
-    
-    const { 
+
+    const {
       period = "monthly",
       year = new Date().getFullYear(),
       month = new Date().getMonth() + 1
@@ -500,16 +784,16 @@ exports.getSellerEarnings = async (req, res) => {
 exports.getStaffDashboard = async (req, res) => {
   try {
     const staffId = req.user._id;
-    
+
     if (req.user.role !== "staff") {
       return res.status(403).json({
         ok: false,
         message: "Access denied - staff only"
       });
     }
-    
+
     const { period = "30" } = req.query;
-    
+
     const dateFrom = new Date();
     dateFrom.setDate(dateFrom.getDate() - parseInt(period));
 
@@ -550,19 +834,23 @@ exports.getStaffDashboard = async (req, res) => {
         .limit(5),
       Order.aggregate([
         { $match: { staffUserId: staffId } },
-        { $group: { 
-          _id: "$buyerUserId", 
-          totalOrders: { $sum: 1 },
-          totalAmount: { $sum: "$finalAmountPaise" }
-        }},
+        {
+          $group: {
+            _id: "$buyerUserId",
+            totalOrders: { $sum: 1 },
+            totalAmount: { $sum: "$finalAmountPaise" }
+          }
+        },
         { $sort: { totalAmount: -1 } },
         { $limit: 5 },
-        { $lookup: {
-          from: "users",
-          localField: "_id",
-          foreignField: "_id",
-          as: "buyer"
-        }}
+        {
+          $lookup: {
+            from: "users",
+            localField: "_id",
+            foreignField: "_id",
+            as: "buyer"
+          }
+        }
       ])
     ]);
 
@@ -604,14 +892,14 @@ exports.getStaffDashboard = async (req, res) => {
 exports.getStaffBuyers = async (req, res) => {
   try {
     const staffId = req.user._id;
-    
+
     if (req.user.role !== "staff") {
       return res.status(403).json({
         ok: false,
         message: "Access denied - staff only"
       });
     }
-    
+
     const buyers = await BuyerProfile.find({ staffUserId: staffId })
       .populate('userId', 'name phone email')
       .select('shopName shopAddress approvalStatus kycVerified creditLimitPaise currentDuePaise')
@@ -622,8 +910,8 @@ exports.getStaffBuyers = async (req, res) => {
       buyers.map(async (buyer) => {
         const [totalOrders, pendingOrders, totalSpent] = await Promise.all([
           Order.countDocuments({ buyerUserId: buyer.userId._id }),
-          Order.countDocuments({ 
-            buyerUserId: buyer.userId._id, 
+          Order.countDocuments({
+            buyerUserId: buyer.userId._id,
             status: { $in: ["confirmed", "processing", "packed"] }
           }),
           Order.aggregate([
@@ -673,7 +961,7 @@ exports.updateOrderStatus = async (req, res) => {
     const userRole = req.user.role;
 
     const validStatuses = [
-      "confirmed", "processing", "packed", 
+      "confirmed", "processing", "packed",
       "shipped", "delivered", "cancelled"
     ];
 
@@ -695,7 +983,7 @@ exports.updateOrderStatus = async (req, res) => {
     // Role-based authorization
     let canUpdate = false;
     let allowedStatuses = [];
-    
+
     if (userRole === "admin") {
       canUpdate = true;
       allowedStatuses = validStatuses;
@@ -710,8 +998,8 @@ exports.updateOrderStatus = async (req, res) => {
       allowedStatuses = ["processing", "packed"];
     } else if (userRole === "buyer") {
       canUpdate = (
-        order.buyerUserId.toString() === userId.toString() && 
-        status === "cancelled" && 
+        order.buyerUserId.toString() === userId.toString() &&
+        status === "cancelled" &&
         !["shipped", "delivered"].includes(order.status)
       );
       allowedStatuses = ["cancelled"];
@@ -751,7 +1039,7 @@ exports.updateOrderStatus = async (req, res) => {
     // Update order status
     order.status = status;
     if (!order.statusLogs) order.statusLogs = [];
-    
+
     order.statusLogs.push({
       timestamp: new Date(),
       actionBy: userId,
@@ -822,7 +1110,7 @@ exports.updatePaymentStatus = async (req, res) => {
 
     // Update payment status
     order.paidAmountPaise = newPaidAmount;
-    
+
     if (newPaidAmount >= order.finalAmountPaise) {
       order.paymentStatus = "paid";
     } else if (newPaidAmount > 0) {
@@ -881,28 +1169,28 @@ exports.bulkUpdateOrders = async (req, res) => {
     }
 
     const results = [];
-    
+
     for (const orderId of orderIds) {
       try {
         const order = await Order.findById(orderId);
         if (order) {
           // Staff can only update their buyers' orders
-          if (userRole === "staff" && 
-              order.staffUserId.toString() !== userId.toString()) {
+          if (userRole === "staff" &&
+            order.staffUserId.toString() !== userId.toString()) {
             results.push({ orderId, success: false, error: "Access denied" });
             continue;
           }
 
           order.status = status;
           if (!order.statusLogs) order.statusLogs = [];
-          
+
           order.statusLogs.push({
             timestamp: new Date(),
             actionBy: userId,
             action: `BULK_${status.toUpperCase()}`,
             note
           });
-          
+
           await order.save();
           results.push({ orderId, success: true });
         } else {
@@ -959,10 +1247,10 @@ exports.bulkDispatchOrders = async (req, res) => {
         const order = await Order.findOne(filter);
 
         if (!order) {
-          results.push({ 
-            orderId, 
-            success: false, 
-            error: "Order not found or not ready for dispatch" 
+          results.push({
+            orderId,
+            success: false,
+            error: "Order not found or not ready for dispatch"
           });
           continue;
         }
@@ -1016,10 +1304,12 @@ exports.bulkDispatchOrders = async (req, res) => {
 // ============================
 
 // ✅ GET BRAND-WISE BILL
+
+// ✅ GET BRAND-WISE BILL (UPDATED WITH PRODUCT POPULATE)
 exports.getBrandWiseBill = async (req, res) => {
   try {
     const { orderId } = req.params;
-    const { brand, sellerUserId } = req.query;
+    const { brand, sellerUserId, priceType = "selling" } = req.query;
 
     if (!brand || !sellerUserId) {
       return res.status(400).json({
@@ -1028,10 +1318,16 @@ exports.getBrandWiseBill = async (req, res) => {
       });
     }
 
+    // ✅ Populate products with purchasePrice from Product model
     const order = await Order.findById(orderId)
       .populate('buyerUserId', 'name phone email')
-      .populate('products.sellerUserId', 'name email businessName')
-      .populate('brandBreakdown.sellerUserId', 'name email businessName');
+      .populate('products.sellerUserId', 'name email businessName phone role')
+      .populate('brandBreakdown.sellerUserId', 'name email businessName phone role')
+      .populate({
+        path: 'products.product',
+        select: 'productName brand purchasePrice salePrice price' // ✅ Include purchasePrice
+      })
+      .lean();
 
     if (!order) {
       return res.status(404).json({
@@ -1041,13 +1337,13 @@ exports.getBrandWiseBill = async (req, res) => {
     }
 
     // Filter for specific brand/seller
-    const brandProducts = order.products.filter(product => 
-      product.brand === brand && 
+    const brandProducts = order.products.filter(product =>
+      product.brand === brand &&
       product.sellerUserId._id.toString() === sellerUserId
     );
 
     const brandBill = order.brandBreakdown.find(breakdown =>
-      breakdown.brand === brand && 
+      breakdown.brand === brand &&
       breakdown.sellerUserId._id.toString() === sellerUserId
     );
 
@@ -1058,29 +1354,84 @@ exports.getBrandWiseBill = async (req, res) => {
       });
     }
 
+    // ✅ Fetch seller details from Seller model
+    const Seller = require("../models/seller.model");
+    const sellerInfo = await Seller.findOne({ userId: sellerUserId }).lean();
+
+    // ✅ Calculate amounts based on price type with product populate
+    let subtotal = 0;
+    const productsWithPricing = brandProducts.map(product => {
+      let pricePerUnit, total;
+      
+      // ✅ Get purchase price from populated product OR order field
+      const purchasePricePerUnitPaise = product.product?.purchasePrice 
+        ? Math.round(product.product.purchasePrice * 100)
+        : (product.purchasePricePerUnitPaise || product.pricePerUnitPaise);
+
+      if (priceType === "purchase") {
+        pricePerUnit = purchasePricePerUnitPaise;
+        total = pricePerUnit * product.quantity;
+      } else {
+        pricePerUnit = product.pricePerUnitPaise;
+        total = product.totalPaise;
+      }
+
+      subtotal += total;
+
+      return {
+        productName: product.productName,
+        brand: product.brand,
+        quantity: product.quantity,
+        pricePerUnitPaise: pricePerUnit,
+        totalPaise: total,
+        // ✅ Include both prices for reference
+        sellingPricePaise: product.pricePerUnitPaise,
+        purchasePricePaise: purchasePricePerUnitPaise
+      };
+    });
+
+    const tax = Math.round(subtotal * 0.18);
+    const total = subtotal + tax;
+
     // Generate bill data
     const billData = {
       orderNumber: order.orderNumber,
-      billNumber: `BILL-${order.orderNumber}-${brand.toUpperCase()}`,
+      billNumber: `BILL-${order.orderNumber}-${brand.toUpperCase()}-${priceType.toUpperCase()}`,
+      date: new Date().toLocaleDateString("en-IN"),
+      priceType: priceType,
+
       buyer: {
         name: order.buyerUserId.name,
         phone: order.buyerUserId.phone,
         email: order.buyerUserId.email,
         address: order.deliveryAddress
       },
-      seller: brandBill.sellerUserId,
+
+      // ✅ Seller details with address
+      sellerDetails: sellerInfo ? {
+        brandName: sellerInfo.brandName,
+        gstNumber: sellerInfo.gstNumber,
+        address: sellerInfo.fullAddress,
+        bankDetails: sellerInfo.payoutBankMasked,
+        contact: {
+          name: brandBill.sellerUserId.name,
+          phone: brandBill.sellerUserId.phone,
+          email: brandBill.sellerUserId.email
+        }
+      } : null,
+
       brand: brand,
-      products: brandProducts.map(product => ({
-        name: product.productName,
-        quantity: product.quantity,
-        pricePerUnit: Math.round(product.pricePerUnitPaise / 100),
-        total: Math.round(product.totalPaise / 100)
-      })),
+      products: productsWithPricing,
+
       amounts: {
-        subtotal: Math.round(brandBill.subtotalPaise / 100),
-        tax: Math.round(brandBill.taxPaise / 100),
-        total: Math.round(brandBill.totalPaise / 100)
+        subtotalPaise: subtotal,
+        taxPaise: tax,
+        totalPaise: total,
+        subtotal: (subtotal / 100).toFixed(2),
+        tax: (tax / 100).toFixed(2),
+        total: (total / 100).toFixed(2)
       },
+
       dates: {
         orderDate: order.createdAt,
         billDate: new Date()
@@ -1102,6 +1453,8 @@ exports.getBrandWiseBill = async (req, res) => {
     });
   }
 };
+
+
 
 // ✅ CANCEL ORDER
 exports.cancelOrder = async (req, res) => {
@@ -1145,14 +1498,14 @@ exports.cancelOrder = async (req, res) => {
     // Cancel order
     order.status = "cancelled";
     if (!order.statusLogs) order.statusLogs = [];
-    
+
     order.statusLogs.push({
       timestamp: new Date(),
       actionBy: userId,
       action: "CANCELLED",
       note: reason || "Order cancelled by user"
     });
-    
+
     await order.save();
 
     res.json({
