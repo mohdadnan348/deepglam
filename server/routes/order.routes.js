@@ -1,58 +1,33 @@
+
+
 // routes/order.routes.js
 const express = require("express");
 const router = express.Router();
-
 const { verifyJWT, requireRole } = require("../middlewares/auth.middleware");
 const orderCtrl = require("../controllers/order.controller");
 
-// ---------------------------
-// BUYER: CREATE ORDER
-// ---------------------------
+// ✅ 1. BUYER ROUTES
 router.post("/", verifyJWT, requireRole(["buyer"]), orderCtrl.createOrder);
 
-// ---------------------------
-// COMMON AUTH ROUTES (ALL AUTH USERS)
-// ---------------------------
+// ✅ 2. COMMON ROUTES (All authenticated users)
 router.get("/my", verifyJWT, orderCtrl.getOrders);
+router.get("/:orderId", verifyJWT, orderCtrl.getOrderById);
+router.get("/:orderId/bill", verifyJWT, orderCtrl.getBrandWiseBill);
+router.put("/:orderId/status", verifyJWT, orderCtrl.updateOrderStatus);
+router.delete("/:orderId", verifyJWT, orderCtrl.cancelOrder);
 
-// Brand-wise bill
-router.get("/bill/:orderId", verifyJWT, orderCtrl.getBrandWiseBill);
-
-// Update status
-router.put("/status/:orderId", verifyJWT, orderCtrl.updateOrderStatus);
-
-// Cancel order
-router.delete("/:orderId/cancel", verifyJWT, orderCtrl.cancelOrder);
-
-// ---------------------------
-// SELLER ROUTES
-// ---------------------------
+// ✅ 3. SELLER ROUTES
 router.get("/seller/dashboard", verifyJWT, requireRole(["seller"]), orderCtrl.getSellerDashboard);
 router.get("/seller/earnings", verifyJWT, requireRole(["seller"]), orderCtrl.getSellerEarnings);
 
-// ---------------------------
-// STAFF ROUTES
-// ---------------------------
+// ✅ 4. STAFF ROUTES  
 router.get("/staff/dashboard", verifyJWT, requireRole(["staff"]), orderCtrl.getStaffDashboard);
 router.get("/staff/buyers", verifyJWT, requireRole(["staff"]), orderCtrl.getStaffBuyers);
+router.put("/:orderId/payment", verifyJWT, requireRole(["staff", "admin"]), orderCtrl.updatePaymentStatus);
+router.post("/dispatch", verifyJWT, requireRole(["staff", "admin"]), orderCtrl.bulkDispatchOrders);
 
-// Payment update
-router.put("/payment/:orderId", verifyJWT, requireRole(["staff", "admin"]), orderCtrl.updatePaymentStatus);
-
-// Dispatch (bulk shipping)
-router.post("/dispatch", verifyJWT, requireRole(["staff", "admin", "seller"]), orderCtrl.bulkDispatchOrders);
-
-// ---------------------------
-// ADMIN ROUTES
-// ---------------------------
-router.put("/bulk-update", verifyJWT, requireRole(["staff", "admin"]), orderCtrl.bulkUpdateOrders);
-
-// Admin + staff both can view full list
+// ✅ 5. ADMIN ROUTES
 router.get("/", verifyJWT, orderCtrl.getOrders);
-
-// ---------------------------
-// PARAM ROUTE — ALWAYS LAST!
-// ---------------------------
-router.get("/:orderId", verifyJWT, orderCtrl.getOrderById);
+router.put("/bulk", verifyJWT, requireRole(["staff", "admin"]), orderCtrl.bulkUpdateOrders);
 
 module.exports = router;
