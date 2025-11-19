@@ -545,6 +545,47 @@ exports.getSellerDashboard = async (req, res) => {
   }
 };
 
+// --- MISSING HANDLER (added): getSellerEarnings
+// This is a minimal, safe endpoint returning seller totals for a period.
+// You can expand it later with more metrics.
+exports.getSellerEarnings = async (req, res) => {
+  try {
+    if (req.user.role !== "seller") {
+      return res.status(403).json({ ok: false, message: "Access denied - sellers only" });
+    }
+    const sellerId = req.user._id;
+    const days = parseInt(req.query.days || "30", 10);
+    const dateFrom = new Date();
+    dateFrom.setDate(dateFrom.getDate() - days);
+
+    const agg = await Order.aggregate([
+      { $match: { "products.sellerUserId": sellerId, createdAt: { $gte: dateFrom } } },
+      { $unwind: "$products" },
+      { $match: { "products.sellerUserId": sellerId } },
+      {
+        $group: {
+          _id: null,
+          totalOrders: { $sum: 1 },
+          totalRevenuePaise: { $sum: "$products.totalPaise" }
+        }
+      }
+    ]);
+
+    const data = agg.length ? agg[0] : { totalOrders: 0, totalRevenuePaise: 0 };
+
+    res.json({
+      ok: true,
+      data: {
+        totalOrders: data.totalOrders,
+        totalRevenue: Math.round((data.totalRevenuePaise || 0) / 100)
+      }
+    });
+  } catch (err) {
+    console.error("getSellerEarnings error:", err);
+    res.status(500).json({ ok: false, message: "Failed to fetch seller earnings", error: err.message });
+  }
+};
+
 // ============================
 // 4. STAFF FUNCTIONS
 // ============================
@@ -654,6 +695,31 @@ exports.getStaffDashboard = async (req, res) => {
       message: "Failed to fetch staff dashboard",
       error: error.message
     });
+  }
+};
+
+// --- MISSING HANDLER (added): getStaffBuyers
+// Minimal helper to return buyers under a staff user.
+exports.getStaffBuyers = async (req, res) => {
+  try {
+    if (req.user.role !== "staff") {
+      return res.status(403).json({ ok: false, message: "Access denied - staff only" });
+    }
+    const staffId = req.user._id;
+    const buyers = await BuyerProfile.find({ staffUserId: staffId }).limit(100).lean();
+
+    res.json({
+      ok: true,
+      data: buyers.map(b => ({
+        id: b._id,
+        shopName: b.shopName,
+        contact: b.contact || null,
+        userId: b.userId
+      }))
+    });
+  } catch (err) {
+    console.error("getStaffBuyers error:", err);
+    res.status(500).json({ ok: false, message: "Failed to fetch buyers", error: err.message });
   }
 };
 
