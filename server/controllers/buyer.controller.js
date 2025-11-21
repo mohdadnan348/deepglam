@@ -82,11 +82,46 @@ exports.createBuyer = async (req, res) => {
       }
     }
 
-    // ✅ Staff lookup by employeeCode
-    const staffUser = await User.findOne({
-      role: "staff",
-      employeeCode: employeeCode.trim().toUpperCase()
-    });
+    // --------------------------
+    // ✅ Robust Staff lookup
+    // --------------------------
+    // We attempt:
+    // 1) Find in User collection: User with role 'staff' and employeeCode (if stored there)
+    // 2) Fallback: check Staff collection (staff.model) for employeeCode and then load linked User
+    const code = (employeeCode || "").toString().trim().toUpperCase();
+    let staffUser = null;
+
+    try {
+      // Try User collection first (some apps store staff as Users with role 'staff')
+      staffUser = await User.findOne({ role: "staff", employeeCode: code });
+      if (staffUser) {
+        console.debug("createBuyer: found staff in User collection", { userId: staffUser._id.toString(), code });
+      }
+    } catch (err) {
+      console.warn("createBuyer: User.findOne(role:staff) error:", err.message);
+    }
+
+    // If not found in User, try Staff model (separate collection with userId reference)
+    if (!staffUser) {
+      try {
+        // Require lazily to avoid circular deps or missing file crash
+        const StaffModel = require("../models/staff.model");
+        const staffDoc = await StaffModel.findOne({ employeeCode: code }).lean();
+        if (staffDoc && staffDoc.userId) {
+          staffUser = await User.findById(staffDoc.userId);
+          if (staffUser) {
+            console.debug("createBuyer: found staff via StaffModel -> linked User", { staffDocId: staffDoc._id.toString(), linkedUserId: staffUser._id.toString() });
+          } else {
+            console.warn("createBuyer: StaffModel found but linked User not found", { staffDocId: staffDoc._id.toString(), linkedUserId: staffDoc.userId });
+          }
+        } else {
+          console.debug("createBuyer: StaffModel lookup returned nothing for code", code);
+        }
+      } catch (err) {
+        // If staff.model doesn't exist or lookup fails, just log and continue to error below
+        console.warn("createBuyer: StaffModel lookup error (maybe model missing?):", err.message);
+      }
+    }
 
     if (!staffUser) {
       return res.status(400).json({
@@ -95,12 +130,14 @@ exports.createBuyer = async (req, res) => {
       });
     }
 
-    // Transaction
+    // --------------------------
+    // Transaction: create user + buyer profile
+    // --------------------------
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
-      // Create user
+      // Create user if not existing
       let user = existingUser;
       if (!user) {
         const salt = await bcrypt.genSalt(10);
@@ -123,7 +160,7 @@ exports.createBuyer = async (req, res) => {
       const buyerProfile = new BuyerProfile({
         userId: user._id,
         staffUserId: staffUser._id,
-        employeeCode: employeeCode.trim().toUpperCase(),
+        employeeCode: code,
         gender: gender.trim(),
 
         shopName: shopName.trim(),
@@ -170,7 +207,7 @@ exports.createBuyer = async (req, res) => {
 
       await buyerProfile.save({ session });
 
-      // Link
+      // Link profile to user
       user.profileId = buyerProfile._id;
       user.profileModel = "BuyerProfile";
       await user.save({ session });
