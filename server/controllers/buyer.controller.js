@@ -4,7 +4,9 @@ const bcrypt = require("bcryptjs");
 const User = require("../models/user.model");
 const BuyerProfile = require("../models/buyer.model");
 const Order = require("../models/order.model");
+const ReturnRequest = require("../models/return.model");
 
+// helper
 const toInt = (v, fallback = 0) => {
   const n = parseInt(v, 10);
   return Number.isNaN(n) ? fallback : n;
@@ -13,11 +15,12 @@ const toInt = (v, fallback = 0) => {
 const isAdmin = (req) => ["admin", "superadmin"].includes(req.user?.role);
 const isStaff = (req) => req.user?.role === "staff";
 
-// ✅ 1. CREATE BUYER (Form Handler)
+/**
+ * CREATE BUYER (robust, defensive)
+ */
 exports.createBuyer = async (req, res) => {
   try {
     const {
-      // User fields (from your form)
       name,
       phone,
       email,
@@ -43,14 +46,13 @@ exports.createBuyer = async (req, res) => {
       upiId
     } = req.body;
 
-    // Validation
+    // Basic validation
     if (!name || !phone || !password || !employeeCode || !gender || !shopName) {
       return res.status(400).json({
         ok: false,
         message: "Name, phone, password, employee code, gender, and shop name are required"
       });
     }
-
     if (!shopAddressLine1 || !city || !state || !postalCode) {
       return res.status(400).json({
         ok: false,
@@ -58,13 +60,16 @@ exports.createBuyer = async (req, res) => {
       });
     }
 
-    // Check existing user
-    const phoneNorm = phone.trim();
-    const emailNorm = email ? email.trim().toLowerCase() : undefined;
+    console.debug("createBuyer:start", { phone, employeeCode });
 
-    const existingUser = await User.findOne({ 
+    // Normalize
+    const phoneNorm = phone.toString().trim();
+    const emailNorm = email ? email.toString().trim().toLowerCase() : undefined;
+
+    // Check existing user
+    const existingUser = await User.findOne({
       $or: [
-        { phone: phoneNorm }, 
+        { phone: phoneNorm },
         ...(emailNorm ? [{ email: emailNorm }] : [])
       ]
     });
@@ -79,8 +84,43 @@ exports.createBuyer = async (req, res) => {
       }
     }
 
-    // Find staff by employeeCode (simplified - you can enhance this)
-    const staffUser = await User.findOne({ role: "staff" }); // Replace with actual staff lookup
+    // --------------------------
+    // Robust staff lookup
+    // --------------------------
+    const code = (employeeCode || "").toString().trim().toUpperCase();
+    let staffUser = null;
+
+    try {
+      // 1) Try User collection (some apps store staff as users)
+      staffUser = await User.findOne({ role: "staff", employeeCode: code });
+      if (staffUser) {
+        console.debug("createBuyer: staff found in User collection", { userId: staffUser._id.toString(), code });
+      }
+    } catch (err) {
+      console.warn("createBuyer: User.findOne error:", err?.message || err);
+    }
+
+    if (!staffUser) {
+      // 2) Fallback: try Staff model if exists (separate collection)
+      try {
+        const StaffModel = require("../models/staff.model"); // may throw if file missing
+        const staffDoc = await StaffModel.findOne({ employeeCode: code }).lean();
+        if (staffDoc && staffDoc.userId) {
+          staffUser = await User.findById(staffDoc.userId);
+          if (staffUser) {
+            console.debug("createBuyer: found staff via StaffModel -> linked User", { staffDocId: staffDoc._id?.toString(), linkedUserId: staffUser._id?.toString() });
+          } else {
+            console.warn("createBuyer: StaffModel found but linked User not found", { staffDocId: staffDoc._id?.toString(), linkedUserId: staffDoc.userId });
+          }
+        } else {
+          console.debug("createBuyer: StaffModel returned no doc for code", code);
+        }
+      } catch (err) {
+        // model missing or lookup failed
+        console.warn("createBuyer: StaffModel require/lookup failed (ok if no Staff model):", err?.message || err);
+      }
+    }
+
     if (!staffUser) {
       return res.status(400).json({
         ok: false,
@@ -88,15 +128,27 @@ exports.createBuyer = async (req, res) => {
       });
     }
 
-    const session = await mongoose.startSession();
-    session.startTransaction();
-
+    // --------------------------
+    // Create user + buyer profile (transaction if supported)
+    // --------------------------
+    let session = null;
+    let useTransactions = true;
     try {
-      // Create user
+      session = await mongoose.startSession();
+      // some Mongo setups (standalone) might not support transactions; try-catch below will fallback
+      session.startTransaction();
+    } catch (txErr) {
+      useTransactions = false;
+      if (session) session.endSession();
+      console.warn("createBuyer: transactions not supported, will use non-transactional flow:", txErr?.message || txErr);
+    }
+
+    const doSave = async () => {
+      // Create user if not exist
       let user = existingUser;
       if (!user) {
         const salt = await bcrypt.genSalt(10);
-        const hashedPassword = password ? await bcrypt.hash(password, salt) : undefined;
+        const hashedPassword = await bcrypt.hash(password, salt);
 
         user = new User({
           name: name.trim(),
@@ -108,54 +160,50 @@ exports.createBuyer = async (req, res) => {
           isVerified: false
         });
 
-        await user.save({ session });
+        if (useTransactions) await user.save({ session });
+        else await user.save();
+        console.debug("createBuyer: new User created", { userId: user._id.toString() });
       }
 
-      // Create buyer profile with form data
+      // Defensive: normalize images if present
+      const safeShopImage = (shopImage && typeof shopImage === "object" && shopImage.url) ? { url: shopImage.url, public_id: shopImage.public_id || "" } : undefined;
+      const safeDocImage = (documentImage && typeof documentImage === "object" && documentImage.url) ? { url: documentImage.url, public_id: documentImage.public_id || "" } : undefined;
+
+      // Build buyer profile
       const buyerProfile = new BuyerProfile({
         userId: user._id,
         staffUserId: staffUser._id,
-        employeeCode: employeeCode.trim().toUpperCase(),
-        gender: gender.trim(),
-        
-        shopName: shopName.trim(),
-        shopImage: shopImage ? {
-          url: shopImage.url || "",
-          public_id: shopImage.public_id || ""
-        } : undefined,
-        
-        // Map form fields to schema
+        employeeCode: code,
+        gender: (gender || "").toString().trim(),
+
+        shopName: shopName.toString().trim(),
+        shopImage: safeShopImage,
+
         shopAddress: {
-          line1: shopAddressLine1.trim(),
-          line2: shopAddressLine2 ? shopAddressLine2.trim() : "",
-          city: city.trim(),
-          state: state.trim(),
-          postalCode: postalCode.trim(),
+          line1: shopAddressLine1.toString().trim(),
+          line2: shopAddressLine2 ? shopAddressLine2.toString().trim() : "",
+          city: city.toString().trim(),
+          state: state.toString().trim(),
+          postalCode: postalCode.toString().trim(),
           country: country || "India"
         },
-        
-        // Document from form
-        documents: (documentType && documentNumber && documentImage) ? [{
-          type: documentType.toUpperCase(),
-          number: documentNumber.trim(),
-          file: {
-            url: documentImage.url || "",
-            public_id: documentImage.public_id || ""
-          },
+
+        documents: (documentType && documentNumber && safeDocImage) ? [{
+          type: (documentType || "").toString().toUpperCase(),
+          number: (documentNumber || "").toString().trim(),
+          file: safeDocImage,
           isVerified: false
         }] : [],
-        
-        // Bank details from form
+
         bankDetails: {
-          bankName: bankName ? bankName.trim() : "",
-          branchName: branchName ? branchName.trim() : "",
-          accountHolderName: accountHolderName ? accountHolderName.trim() : "",
-          accountNumber: accountNumber ? accountNumber.trim() : "",
-          ifscCode: ifscCode ? ifscCode.trim().toUpperCase() : "",
-          upiId: upiId ? upiId.trim() : ""
+          bankName: bankName ? bankName.toString().trim() : "",
+          branchName: branchName ? branchName.toString().trim() : "",
+          accountHolderName: accountHolderName ? accountHolderName.toString().trim() : "",
+          accountNumber: accountNumber ? accountNumber.toString().trim() : "",
+          ifscCode: ifscCode ? ifscCode.toString().trim().toUpperCase() : "",
+          upiId: upiId ? upiId.toString().trim() : ""
         },
-        
-        // Default values
+
         creditLimitPaise: 0,
         currentDuePaise: 0,
         allowCredit: false,
@@ -164,46 +212,64 @@ exports.createBuyer = async (req, res) => {
         kycVerified: false
       });
 
-      await buyerProfile.save({ session });
+      if (useTransactions) await buyerProfile.save({ session });
+      else await buyerProfile.save();
 
-      // Link user with profile
+      // Link profile to user
       user.profileId = buyerProfile._id;
       user.profileModel = "BuyerProfile";
-      await user.save({ session });
+      if (useTransactions) await user.save({ session });
+      else await user.save();
 
-      await session.commitTransaction();
+      return { user, buyerProfile };
+    };
 
-      res.status(201).json({
+    try {
+      const result = await doSave();
+
+      if (useTransactions && session) {
+        await session.commitTransaction();
+        session.endSession();
+      }
+
+      return res.status(201).json({
         ok: true,
         message: "Buyer created successfully",
         data: {
           user: {
-            _id: user._id,
-            name: user.name,
-            phone: user.phone,
-            email: user.email,
-            role: user.role
+            _id: result.user._id,
+            name: result.user.name,
+            phone: result.user.phone,
+            email: result.user.email,
+            role: result.user.role
           },
-          profile: buyerProfile
+          profile: result.buyerProfile
         }
       });
-
-    } catch (error) {
-      await session.abortTransaction();
-      throw error;
-    } finally {
-      session.endSession();
+    } catch (innerErr) {
+      if (useTransactions && session) {
+        try { await session.abortTransaction(); } catch (e) { console.warn("abortTransaction failed:", e?.message || e); }
+        session.endSession();
+      }
+      console.error("createBuyer: transaction/save error:", innerErr);
+      return res.status(500).json({
+        ok: false,
+        message: "Failed to create buyer (save error)",
+        error: innerErr?.message || String(innerErr),
+        errorType: innerErr?.name || "SaveError"
+      });
     }
-
-  } catch (error) {
-    console.error("Buyer creation error:", error);
-    res.status(500).json({
+  } catch (err) {
+    console.error("createBuyer: outer error:", err);
+    return res.status(500).json({
       ok: false,
       message: "Failed to create buyer",
-      error: error.message
+      error: err?.message || String(err),
+      errorType: err?.name || "UnknownError"
     });
   }
 };
+
 
 
 /**
