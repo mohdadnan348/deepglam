@@ -46,6 +46,13 @@ exports.createBuyer = async (req, res) => {
       upiId
     } = req.body;
 
+    // DEBUG: log incoming body for troubleshooting
+    try {
+      console.debug("createBuyer incoming body:", JSON.stringify(req.body || {}, null, 2));
+    } catch (dbgErr) {
+      console.debug("createBuyer incoming body: (could not stringify)", req.body);
+    }
+
     // Basic validation
     if (!name || !phone || !password || !employeeCode || !gender || !shopName) {
       return res.status(400).json({
@@ -251,11 +258,27 @@ exports.createBuyer = async (req, res) => {
         try { await session.abortTransaction(); } catch (e) { console.warn("abortTransaction failed:", e?.message || e); }
         session.endSession();
       }
-      console.error("createBuyer: transaction/save error:", innerErr);
+
+      // --- DEBUG: log full error
+      console.error("createBuyer: transaction/save error (full):", innerErr);
+      try {
+        if (innerErr && innerErr.code === 11000) {
+          console.error("createBuyer: duplicate key error details:", innerErr.keyValue, innerErr.keyPattern);
+        }
+        if (innerErr && innerErr.name === "ValidationError") {
+          console.error("createBuyer: mongoose validation errors:", innerErr.errors);
+        }
+      } catch (logErr) {
+        console.error("createBuyer: error while logging innerErr details:", logErr);
+      }
+
+      // --- Return useful debug info to client (remove in prod once fixed)
       return res.status(500).json({
         ok: false,
         message: "Failed to create buyer (save error)",
-        error: innerErr?.message || String(innerErr),
+        debugError: (innerErr && (innerErr.message || innerErr.toString())) || "unknown",
+        code: innerErr && innerErr.code ? innerErr.code : undefined,
+        keyValue: innerErr && innerErr.keyValue ? innerErr.keyValue : undefined,
         errorType: innerErr?.name || "SaveError"
       });
     }
