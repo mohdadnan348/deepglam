@@ -1,102 +1,108 @@
-// controllers/product.controller.js
 const mongoose = require('mongoose');
 const Product = require('../models/product.model');
-const User = require('../models/user.model'); // agar zarurat ho to use karo
+const User = require('../models/user.model'); 
 
 /* ---------- helpers ---------- */
-const toNum = (v) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-};
-const toInt = (v) => Math.round(toNum(v));
+const toNum = v => (Number.isFinite(Number(v)) ? Number(v) : 0);
+const toInt = v => Math.round(toNum(v));
 
-const calc = ({ purchasePrice, includedPercentage = 0, discountPercentage = 0, discountAmount = 0, gstPercentage = 0, gstType = 'exclusive' }) => {
+// Updated price calculator for new model
+const calc = ({ purchasePrice, includedPercentage=0, discountPercentage=0, discountAmount=0, gstPercentage=0, gstType='exclusive' }) => {
   const _purchasePrice = toNum(purchasePrice);
   const _includedPct = toNum(includedPercentage);
-
+  
+  // Calculate price based on purchasePrice + includedPercentage
   const basePrice = _purchasePrice + (_purchasePrice * _includedPct / 100);
-
-  const discPctAmt = basePrice * (toNum(discountPercentage) / 100);
+  
+  // Apply discount
+  const discPctAmt = basePrice * (toNum(discountPercentage)/100);
   const theDisc = Math.max(toNum(discountAmount), discPctAmt);
   const afterDisc = Math.max(basePrice - theDisc, 0);
 
+  // Calculate GST
   const inclusive = String(gstType).toLowerCase() === 'inclusive';
   const gstAmtFloat = inclusive
-    ? (afterDisc - (afterDisc / (1 + toNum(gstPercentage) / 100)))
-    : (afterDisc * toNum(gstPercentage) / 100);
+    ? (afterDisc - (afterDisc / (1 + toNum(gstPercentage)/100)))
+    : (afterDisc * toNum(gstPercentage)/100);
 
   const salePrice = inclusive ? afterDisc : (afterDisc + gstAmtFloat);
 
-  return {
+  return { 
     price: Math.round(basePrice * 100) / 100,
-    priceAfterDiscount: Math.round(afterDisc * 100) / 100,
-    gstAmount: Math.round(gstAmtFloat * 100) / 100,
+    priceAfterDiscount: Math.round(afterDisc * 100) / 100, 
+    gstAmount: Math.round(gstAmtFloat * 100) / 100, 
     salePrice: Math.round(salePrice * 100) / 100,
-    discountApplied: Math.round(theDisc * 100) / 100
+    discountApplied: Math.round(theDisc * 100) / 100 
   };
 };
 
+// images
 const toImageObj = (v) => {
   if (!v) return null;
   if (typeof v === 'string') return { url: v, public_id: '' };
-  if (v && typeof v === 'object') return {
-    url: v.url || v.uri || '',
-    public_id: v.public_id || v.fileName || ''
+  if (v && typeof v === 'object') return { 
+    url: v.url || v.uri || '', 
+    public_id: v.public_id || v.fileName || '' 
   };
   return null;
 };
+
 const toImageObjArray = (arr) => (Array.isArray(arr) ? arr.map(toImageObj).filter(Boolean) : []);
 
-/* Variations handler:
-   - For Simple: expect simpleVariations = [{ size, color, pieces }]
-   - For Attribute: expect attributeVariations = [{ size, color, pieces }]
-*/
+// Variations handler
 const processVariations = (simpleVariations, attributeVariations, productType) => {
-  const normalize = (v) => ({
-    size: v.size ? String(v.size).trim() : '',
-    color: v.color ? String(v.color).trim() : '',
-    pieces: v.pieces !== undefined && v.pieces !== null ? String(v.pieces).trim() : ''
-  });
-
-  if (String(productType).toLowerCase() === 'simple') {
-    return Array.isArray(simpleVariations) ? simpleVariations.map(normalize).filter(x => x.size || x.color) : [];
-  } else {
-    return Array.isArray(attributeVariations) ? attributeVariations.map(normalize).filter(x => x.size || x.color) : [];
+  if (productType === 'Simple') {
+    return Array.isArray(simpleVariations) 
+      ? simpleVariations.filter(v => v.size && v.color).map(v => ({
+          size: String(v.size).trim(),
+          color: String(v.color).trim()
+        }))
+      : [];
+  } else if (productType === 'Attribute') {
+    return Array.isArray(attributeVariations)
+      ? attributeVariations.filter(v => v.size && v.color).map(v => ({
+          size: String(v.size).trim(),
+          color: String(v.color).trim(),
+          pieces: v.pieces ? String(v.pieces).trim() : ''
+        }))
+      : [];
   }
+  return [];
 };
 
-/* Resolve authenticated user id from request (works with typical auth middlewares) */
+/** ✅ FIXED - Resolve userId from authenticated user */
 function resolveUserId(req) {
-  // req.user expected from auth middleware (passport/jwt/etc)
-  if (!req || !req.user) return null;
-  return req.user._id || req.user.id || null;
+  console.log('🔍 Resolving userId from:', {
+    user: req.user ? { id: req.user._id, role: req.user.role } : 'No user object'
+  });
+  return req.user?._id || req.user?.id || null;
 }
 
 /* ---------------------------------------
-   CREATE PRODUCT - replace-ready controller
+   CREATE PRODUCT
 ----------------------------------------*/
 exports.createProduct = async (req, res) => {
   try {
     const {
       mainCategory, subCategory, productType, productName,
-      hsnCode, MOQ, purchasePrice,
+      hsnCode, MOQ, purchasePrice, 
       includedPercentage = 0,
-      discountPercentage = 0, discountAmount = 0,
+      discountPercentage = 0, discountAmount = 0, 
       gstPercentage = 0, gstType = 'exclusive',
       simpleVariations, attributeVariations,
       brand, mainImage, images = [], productDescription,
-      status // optional if admin passes; otherwise default to disapproved
-    } = req.body || {};
+    } = req.body;
 
-    // Basic validation
+    // Validation
     if (!productName) return res.status(400).json({ message: 'productName is required' });
     if (!mainCategory) return res.status(400).json({ message: 'mainCategory is required' });
     if (!subCategory) return res.status(400).json({ message: 'subCategory is required' });
-    if (purchasePrice === undefined || purchasePrice === null) return res.status(400).json({ message: 'purchasePrice is required' });
+    if (purchasePrice === undefined || purchasePrice === null)
+      return res.status(400).json({ message: 'purchasePrice is required' });
     if (!productType) return res.status(400).json({ message: 'productType is required' });
     if (!mainImage) return res.status(400).json({ message: 'mainImage is required' });
 
-    // Resolve userId from authenticated user (important!)
+    // Get userId from authenticated user
     const userId = resolveUserId(req);
     if (!userId) return res.status(401).json({ message: 'User not authenticated' });
 
@@ -105,45 +111,36 @@ exports.createProduct = async (req, res) => {
       purchasePrice, includedPercentage, discountPercentage, discountAmount, gstPercentage, gstType
     });
 
-    // Process variations according to productType
+    // Process variations based on product type
     const variations = processVariations(simpleVariations, attributeVariations, productType);
 
     const payload = {
       userId: new mongoose.Types.ObjectId(userId),
-      mainCategory: String(mainCategory).trim(),
-      subCategory: String(subCategory).trim(),
-      productType: String(productType).trim(),
-      productName: String(productName).trim(),
-      hsnCode: hsnCode ? String(hsnCode).trim() : '',
-      brand: brand ? String(brand).trim() : '',
+      mainCategory, subCategory, productType, productName,
+      hsnCode, brand,
       purchasePrice: toNum(purchasePrice),
       includedPercentage: toNum(includedPercentage),
-      price: toNum(price),
-      priceAfterDiscount: toNum(priceAfterDiscount),
+      price,
       discountPercentage: toNum(discountPercentage),
-      discountAmount: toNum(discountApplied),
+      discountAmount: discountApplied,
       gstPercentage: toNum(gstPercentage),
-      gstAmount: toNum(gstAmount),
-      gstType: gstType || 'exclusive',
-      salePrice: toNum(salePrice),
-      MOQ: toInt(MOQ || 0),
+      gstAmount, gstType, salePrice,
+      MOQ: toInt(MOQ),
       variations,
-      productDescription: productDescription ? String(productDescription).trim() : '',
+      productDescription: productDescription ? String(productDescription).trim() : "",
       mainImage: toImageObj(mainImage),
       images: toImageObjArray(images),
-      status: status ? String(status) : "disapproved",
-      isActive: true
+      status: "disapproved",
+      isActive: true,
     };
 
-    if (!payload.mainImage || !payload.mainImage.url) {
-      return res.status(400).json({ message: 'mainImage must be a valid image object with url' });
-    }
+    if (!payload.mainImage) return res.status(400).json({ message: 'mainImage must be a valid image object' });
 
     const saved = await Product.create(payload);
     return res.status(201).json({ message: 'Product created (pending approval)', product: saved });
   } catch (err) {
     console.error('❌ Product creation error:', err);
-    return res.status(500).json({ message: 'Product creation failed', error: err.message || err.toString() });
+    return res.status(500).json({ message: 'Product creation failed', error: err.message });
   }
 };
 

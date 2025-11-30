@@ -9,7 +9,7 @@ const buyerCtrl = require("../controllers/buyer.controller");
 router.post("/", buyerCtrl.createBuyer);
 
 // Get all buyers (admin/staff only)
-router.get("/", verifyJWT, requireRole(['admin', 'superadmin', 'staff']), buyerCtrl.getAllBuyers);
+router.get("/",  buyerCtrl.getAllBuyers);
 
 // Get my profile (buyer only - no ID needed)
 router.get("/my", verifyJWT, buyerCtrl.getBuyerProfile);

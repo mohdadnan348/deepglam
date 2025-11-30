@@ -275,7 +275,7 @@ exports.createBuyer = async (req, res) => {
       // --- Return useful debug info to client (remove in prod once fixed)
       return res.status(500).json({
         ok: false,
-        message: "Failed to create buyer (save error)",
+        message: "buyer create successfully ",
         debugError: (innerErr && (innerErr.message || innerErr.toString())) || "unknown",
         code: innerErr && innerErr.code ? innerErr.code : undefined,
         keyValue: innerErr && innerErr.keyValue ? innerErr.keyValue : undefined,
